@@ -47,6 +47,36 @@ The complete workflow:
 4. Waits for explicit confirmation in the browser.
 5. Only after confirmation, creates `<original-name>_remediated.pdf`, re-audits it, and displays the remediation results.
 
+## Customer workflow diagram
+
+The JSON audit report is the handoff contract between auditing and remediation. Customers can generate it with the included rules-based auditor or supply a compatible report from another application. The standalone remediator reads that persisted JSON together with the associated source PDF. It never overwrites the source PDF: when remediation is requested, it creates a new copy and then re-audits that copy to document successful, unresolved, and manual-review items.
+
+```mermaid
+flowchart LR
+    A["Source PDF"] --> B["Rules-based audit"]
+    B --> C["accessibility-report-&lt;file_name&gt;.json"]
+    B --> D["HTML audit report"]
+
+    X["Compatible external auditor"] --> C
+
+    C --> E{"Customer requests remediation?"}
+    E -- "No" --> F["No PDF changes"]
+    E -- "Yes" --> G["Standalone remediator"]
+    A --> G
+    G --> H["New remediated PDF"]
+    H --> I["Re-audit and remediation report"]
+
+    A -. "Original preserved" .-> H
+```
+
+The two input paths shown above are supported as follows:
+
+- **Included audit path:** `pdf_accessibility_audit.py` inspects the source PDF and writes both the JSON contract and an HTML report.
+- **External audit path:** another application may provide the JSON contract if it uses the expected schema and `accessibility-report-<file_name>.json` naming convention.
+- **Approval boundary:** the complete interactive workflow waits for the customer to click the remediation button. Running the standalone remediator is itself the explicit remediation request.
+- **Output behavior:** remediation creates `<file_name>_remediated.pdf`; the original remains unchanged.
+- **Verification:** the remediated copy is audited again, and the resulting HTML report identifies remediated, unresolved, and manual-review findings.
+
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
 
 Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, and structured tab order where a real structure tree exists. It does **not** pretend that an untagged PDF is tagged, invent text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance. The remediation report cites the controlling source requirement and identifies unsuccessful and manual work.
