@@ -14,6 +14,8 @@ from pypdf.generic import BooleanObject, DictionaryObject, IndirectObject, NameO
 
 from pdf_accessibility_audit import AuditReport, DISCLAIMER, audit_pdf, read_json
 
+AUDIT_REPORT_PREFIX = "accessibility-report-"
+
 
 @dataclass(frozen=True)
 class RemediationItem:
@@ -44,6 +46,50 @@ def _resolve(value: Any) -> Any:
     return value
 
 
+def pdf_name_from_report(audit_json: str | Path) -> str | None:
+    """Return the PDF filename encoded by accessibility-report-<file_name>.json."""
+    report_name = Path(audit_json).name
+    if not report_name.lower().startswith(AUDIT_REPORT_PREFIX) or not report_name.lower().endswith(".json"):
+        return None
+    file_name = report_name[len(AUDIT_REPORT_PREFIX):-len(".json")].strip()
+    if not file_name:
+        return None
+    return file_name if file_name.lower().endswith(".pdf") else f"{file_name}.pdf"
+
+
+def resolve_source_pdf(
+    audit_json: str | Path,
+    audit_report: AuditReport,
+    source_pdf: str | Path | None = None,
+) -> Path:
+    """Resolve the PDF explicitly, from the report filename, or from its JSON metadata."""
+    report_path = Path(audit_json).expanduser().resolve()
+    if source_pdf is not None:
+        return Path(source_pdf).expanduser().resolve()
+
+    encoded_name = pdf_name_from_report(report_path)
+    candidates: list[Path] = []
+    if encoded_name:
+        candidates.extend((report_path.parent / encoded_name, Path.cwd() / encoded_name))
+
+    reported_path = Path(audit_report.file).expanduser()
+    if reported_path.is_absolute():
+        candidates.append(reported_path)
+    else:
+        candidates.extend((report_path.parent / reported_path, Path.cwd() / reported_path))
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+
+    expected = encoded_name or Path(audit_report.file).name or "<file_name>.pdf"
+    raise FileNotFoundError(
+        f"PDF for audit report not found. Place {expected} beside {report_path.name} "
+        "or specify it with --pdf."
+    )
+
+
 def remediate_from_json(
     audit_json: str | Path,
     output_path: str | Path,
@@ -52,7 +98,7 @@ def remediate_from_json(
 ) -> RemediationReport:
     """Remediate the source PDF identified by an audit JSON report."""
     before = read_json(audit_json)
-    source = Path(source_pdf or before.file).expanduser().resolve()
+    source = resolve_source_pdf(audit_json, before, source_pdf)
     destination = Path(output_path).expanduser().resolve()
 
     if not source.is_file():
@@ -164,9 +210,10 @@ def write_remediation_html(report: RemediationReport, output_path: str | Path, d
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Remediate a PDF using a JSON audit report.")
-    parser.add_argument("audit_json", help="JSON report produced by pdf_accessibility_audit.py")
-    parser.add_argument("--output", "-o", required=True, help="Path for the remediated PDF copy")
-    parser.add_argument("--report", default="accessibility-report-remediation.html", help="Remediation HTML report path")
+    parser.add_argument("audit_json", help="Audit JSON named accessibility-report-<file_name>.json")
+    parser.add_argument("--pdf", help="Source PDF path; optional when its name is encoded in the report filename")
+    parser.add_argument("--output", "-o", help="Remediated PDF path; defaults beside the source PDF")
+    parser.add_argument("--report", help="Remediation HTML report path; defaults beside the audit JSON")
     parser.add_argument("--language", default="en-US", help="Default language used when the audit reports none")
     parser.add_argument("--no-open", action="store_true", help="Do not open the remediation HTML report")
     return parser
@@ -175,8 +222,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
     try:
-        result = remediate_from_json(args.audit_json, args.output, args.language)
-        report_path = write_remediation_html(result, args.report)
+        audit_report = read_json(args.audit_json)
+        source = resolve_source_pdf(args.audit_json, audit_report, args.pdf)
+        output = Path(args.output).expanduser().resolve() if args.output else source.with_name(f"{source.stem}_remediated.pdf")
+        audit_json_path = Path(args.audit_json).expanduser().resolve()
+        report_output = (
+            Path(args.report).expanduser().resolve()
+            if args.report
+            else audit_json_path.with_name(f"{audit_json_path.stem}-remediation.html")
+        )
+        result = remediate_from_json(args.audit_json, output, args.language, source)
+        report_path = write_remediation_html(result, report_output)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

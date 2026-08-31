@@ -424,7 +424,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Screen a PDF for common accessibility barriers.")
     parser.add_argument("pdf", help="Path to the PDF to evaluate")
     parser.add_argument("--output", "-o", default="accessibility-report.html", help="HTML report path")
-    parser.add_argument("--json", dest="json_output", default="accessibility-report.json", help="JSON report path")
+    parser.add_argument("--json", dest="json_output", help="JSON report path; defaults to accessibility-report-<file_name>.json")
     parser.add_argument("--no-open", action="store_true", help="Do not open the HTML report in a browser")
     return parser
 
@@ -434,7 +434,9 @@ def main() -> int:
     try:
         report = audit_pdf(args.pdf)
         html_path = write_html(report, args.output)
-        json_path = write_json(report, args.json_output)
+        source = Path(args.pdf).expanduser().resolve()
+        json_output = args.json_output or f"accessibility-report-{source.stem}.json"
+        json_path = write_json(report, json_output)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
