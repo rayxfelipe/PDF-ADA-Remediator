@@ -1,0 +1,9 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "PDF_CONTAINER_NAME": "pdf-jobs",
+    "PDF_MAX_UPLOAD_BYTES": "20971520"
+  }
+}
