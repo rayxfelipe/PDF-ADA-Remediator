@@ -47,7 +47,7 @@ The complete workflow:
 4. Waits for explicit confirmation in the browser.
 5. Only after confirmation, creates `<original-name>_remediated.pdf`, re-audits it, and displays the remediation results.
 
-## Customer workflow diagram
+## Workflow Diagram
 
 The JSON audit report is the handoff contract between auditing and remediation. Customers can generate it with the included rules-based auditor or supply a compatible report from another application. The standalone remediator reads that persisted JSON together with the associated source PDF. It never overwrites the source PDF: when remediation is requested, it creates a new copy and then re-audits that copy to document successful, unresolved, and manual-review items.
 
