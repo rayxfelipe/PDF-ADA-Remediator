@@ -1,10 +1,25 @@
-# PDF Accessibility Screening
+# PDF Accessibility Screening and Remediation
 
-A Python command-line tool that screens a PDF for common accessibility barriers and creates an accessible HTML report. The screening rules are derived from a local policy source named `ADA Title II Web Accessibility.docx`. Every report finding identifies the applicable policy requirement. The source policy document and input PDFs are intentionally excluded from this repository; they are not required at runtime because the relevant screening rules are encoded in the application.
+This is a **standalone Python application** that audits PDF files for common accessibility barriers and applies a limited set of deterministic remediations. The local workflow runs entirely on the user's computer and does not require Azure, an LLM, Microsoft Agent Framework, an API key, or an internet connection after its Python dependencies are installed.
 
-The source document requires full PDF/UA conformance for PDFs and specifically requires text alternatives for non-text content, keyboard navigation, and at least 4.5:1 color contrast. The tool screens PDF structure, language, title metadata, bookmarks, extractable text, scanned pages, figure alternatives, and form names as machine-checkable PDF/UA indicators. Keyboard operation, semantic accuracy, alternative-text quality, and contrast remain manual checks.
+The application uses **rules-based logic**, not generative AI. Its audit rules inspect the PDF object structure, metadata, extractable text, images, forms, and navigation features through `pypdf`. Its remediation rules make only predefined, non-destructive changes that can be applied safely without inventing document meaning.
 
-> This tool does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
+## Accessibility-rule basis
+
+The encoded screening policy was derived from a project-specific source document named `ADA Title II Web Accessibility.docx`. That document identifies PDF documents as in scope, calls for full PDF/UA conformance, references WCAG 2.1 Level AA and Section 508, and identifies requirements including:
+
+- Text alternatives for non-text content
+- Keyboard navigation and operation
+- A minimum 4.5:1 text color-contrast ratio
+- Semantic PDF structure consistent with PDF/UA expectations
+
+The source policy document is intentionally excluded from this public repository. Its relevant screening requirements are represented in the application as named rules, and every finding identifies the source requirement used by that rule.
+
+The automated audit checks PDF tagging, logical structure, document language, title metadata, title-display preferences, bookmarks, extractable text, likely scanned pages, figure alternatives, and form-field names. Requirements that cannot be established reliably through static inspection—such as semantic accuracy, reading order, heading quality, table associations, meaningful alternate text, keyboard usability, screen-reader behavior, and visual contrast—are reported as manual reviews.
+
+The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order when a genuine structure tree already exists. It does not fabricate tags, generate alternate text, perform OCR, infer headings or tables, change visual contrast, or make legal compliance determinations.
+
+> This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
 
 ## Setup
 
