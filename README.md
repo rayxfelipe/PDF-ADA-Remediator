@@ -19,6 +19,20 @@ The automated audit reports the same 32 named rule areas shown by the Acrobat ac
 
 The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order. For an untagged document, it can add a baseline structure tree that tags text objects as paragraphs, image draws as figures, and layout graphics as artifacts. Image-only pages receive a page-level Figure tag. It does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
 
+### Acrobat-aligned rule coverage
+
+| Category | Rules reported | Automatic remediation |
+| --- | --- | --- |
+| Document | Accessibility permission flag, Image-only PDF, Tagged PDF, Logical Reading Order, Primary language, Title, Bookmarks, Color contrast | Adds baseline tags, language, title, and title-display preference. OCR, bookmarks, reading order, permissions, and contrast remain unresolved or manual when they fail. |
+| Page Content | Tagged content, Tagged annotations, Tab order, Character encoding, Tagged multimedia, Screen flicker, Scripts, Timed responses, Navigation links | Tags baseline page content and sets structure-based tab order. Annotation, encoding, multimedia, script, timing, flicker, and link issues are reported but are not rewritten automatically. |
+| Forms | Tagged form fields, Field descriptions | Validates field tagging and accessible names. It does not invent missing field descriptions or restructure form widgets. |
+| Alternate Text | Figures alternate text, Nested alternate text, Associated with content, Hides annotation, Other elements alternate text | Validates structure and associations. It does not invent meaningful alternate text. |
+| Tables | Rows, TH and TD, Headers, Regularity, Summary | Validates existing table tags. It does not infer or rebuild table semantics. |
+| Lists | List items, Lbl and LBody | Validates existing list hierarchy. It does not infer or rebuild lists. |
+| Headings | Appropriate nesting | Validates heading-level order. It does not infer headings from visual formatting. |
+
+The remediation results report includes every rule, including rules that already passed, were remediated, remain unresolved, require manual review, were skipped, or do not apply. A reported rule is not necessarily an automatically repairable rule.
+
 > This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
 
 ## Setup
