@@ -17,7 +17,7 @@ The source policy document is intentionally excluded from this public repository
 
 The automated audit checks PDF tagging, logical structure, document language, title metadata, title-display preferences, bookmarks, extractable text, likely scanned pages, figure alternatives, and form-field names. Requirements that cannot be established reliably through static inspection—such as semantic accuracy, reading order, heading quality, table associations, meaningful alternate text, keyboard usability, screen-reader behavior, and visual contrast—are reported as manual reviews.
 
-The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order when a genuine structure tree already exists. It does not fabricate tags, generate alternate text, perform OCR, infer headings or tables, change visual contrast, or make legal compliance determinations.
+The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order. For a document in which every page is an image with no extractable text, it can add a minimal `Document > Figure` structure tree and associate each page's existing content with its Figure tag. It does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
 
 > This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
 
@@ -79,7 +79,7 @@ The two input paths shown above are supported as follows:
 
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
 
-Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, and structured tab order where a real structure tree exists. It does **not** pretend that an untagged PDF is tagged, invent text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance. The remediation report cites the controlling source requirement and identifies unsuccessful and manual work.
+Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, structured tab order, and minimal page-level Figure tagging for fully image-only documents. It does **not** invent OCR text or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance. The remediation report cites the controlling source requirement and identifies unsuccessful and manual work.
 
 Run only the audit:
 

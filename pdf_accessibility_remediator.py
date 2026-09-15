@@ -10,7 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, DictionaryObject, IndirectObject, NameObject, TextStringObject
+from pypdf.generic import (
+    ArrayObject,
+    BooleanObject,
+    ContentStream,
+    DictionaryObject,
+    IndirectObject,
+    NameObject,
+    NumberObject,
+    TextStringObject,
+)
 
 from pdf_accessibility_audit import AuditReport, DISCLAIMER, audit_pdf, read_json
 
@@ -44,6 +53,78 @@ def _resolve(value: Any) -> Any:
     while isinstance(value, IndirectObject):
         value = value.get_object()
     return value
+
+
+def _page_has_image(page: Any) -> bool:
+    resources = _resolve(page.get("/Resources"))
+    if not isinstance(resources, DictionaryObject):
+        return False
+    xobjects = _resolve(resources.get("/XObject"))
+    if not isinstance(xobjects, DictionaryObject):
+        return False
+    return any(
+        isinstance(_resolve(value), DictionaryObject) and _resolve(value).get("/Subtype") == "/Image"
+        for value in xobjects.values()
+    )
+
+
+def _tag_image_only_document(writer: PdfWriter) -> bool:
+    """Add a minimal, valid structure tree when every page is a scanned image."""
+    pages = list(writer.pages)
+    if not pages or any((page.extract_text() or "").strip() or not _page_has_image(page) for page in pages):
+        return False
+
+    structure_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
+    structure_root_ref = writer._add_object(structure_root)
+    document_element = DictionaryObject({
+        NameObject("/Type"): NameObject("/StructElem"),
+        NameObject("/S"): NameObject("/Document"),
+        NameObject("/P"): structure_root_ref,
+        NameObject("/K"): ArrayObject(),
+    })
+    document_ref = writer._add_object(document_element)
+    parent_tree_numbers = ArrayObject()
+
+    for page_index, page in enumerate(pages):
+        page_ref = page.indirect_reference
+        if page_ref is None:
+            raise ValueError("Unable to reference a page while creating the PDF structure tree.")
+
+        figure = DictionaryObject({
+            NameObject("/Type"): NameObject("/StructElem"),
+            NameObject("/S"): NameObject("/Figure"),
+            NameObject("/P"): document_ref,
+            NameObject("/Pg"): page_ref,
+            NameObject("/K"): NumberObject(0),
+        })
+        figure_ref = writer._add_object(figure)
+        document_element[NameObject("/K")].append(figure_ref)
+
+        content = ContentStream(page.get_contents(), writer)
+        content.operations.insert(0, (
+            [NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(0)})],
+            b"BDC",
+        ))
+        content.operations.append(([], b"EMC"))
+        page.replace_contents(content)
+        page[NameObject("/StructParents")] = NumberObject(page_index)
+        page[NameObject("/Tabs")] = NameObject("/S")
+
+        parent_tree_numbers.extend((NumberObject(page_index), ArrayObject([figure_ref])))
+
+    parent_tree = DictionaryObject({NameObject("/Nums"): parent_tree_numbers})
+    structure_root[NameObject("/K")] = document_ref
+    structure_root[NameObject("/ParentTree")] = writer._add_object(parent_tree)
+    structure_root[NameObject("/ParentTreeNextKey")] = NumberObject(len(pages))
+
+    mark_info = _resolve(writer._root_object.get("/MarkInfo"))
+    if not isinstance(mark_info, DictionaryObject):
+        mark_info = DictionaryObject()
+        writer._root_object[NameObject("/MarkInfo")] = mark_info
+    mark_info[NameObject("/Marked")] = BooleanObject(True)
+    mark_info[NameObject("/Suspects")] = BooleanObject(False)
+    writer._root_object[NameObject("/StructTreeRoot")] = structure_root_ref
+    return True
 
 
 def pdf_name_from_report(audit_json: str | Path) -> str | None:
@@ -130,6 +211,9 @@ def remediate_from_json(
     if before_by_id["DOC-004"].status != "pass":
         title = source.stem.replace("_", " ").replace("-", " ").strip() or "Accessible document"
         writer.add_metadata({"/Title": title})
+
+    if root.get("/StructTreeRoot") is None:
+        _tag_image_only_document(writer)
 
     viewer_prefs = _resolve(root.get("/ViewerPreferences"))
     if not isinstance(viewer_prefs, DictionaryObject):

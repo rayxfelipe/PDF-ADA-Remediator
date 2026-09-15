@@ -379,7 +379,7 @@ def write_html(report: AuditReport, output_path: str | Path, remediation_url: st
                 remediation_panel = f"""
 <section class="panel action" aria-labelledby="remediate-heading">
     <h2 id="remediate-heading">Apply automatic remediation?</h2>
-    <p>A new PDF will be created; the source file will not be changed. Safe metadata and viewer fixes will be applied. Semantic tagging, reading order, alternate-text meaning, tables, and visual contrast require human review.</p>
+    <p>A new PDF will be created; the source file will not be changed. Safe metadata and viewer fixes will be applied. A fully image-only document can also receive a minimal Document and Figure structure so its existing page content is tagged. OCR, alternate-text meaning, detailed semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
     <form method="post" action="{html.escape(remediation_url, quote=True)}" onsubmit="return confirm('Create a remediated copy now? The original will not be overwritten.');">
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
         <button type="submit">Yes, apply remediation</button>
