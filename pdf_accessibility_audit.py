@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from pypdf import PdfReader
-from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject
+from pypdf.constants import UserAccessPermissions
+from pypdf.generic import ArrayObject, ContentStream, DictionaryObject, IndirectObject
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,16 @@ class AuditReport:
 
 
 WEIGHTS = {"critical": 10, "high": 7, "medium": 4, "low": 1}
+ACROBAT_RULE_IDS = (
+    "ACR-DOC-001", "ACR-DOC-002", "ACR-DOC-003", "ACR-DOC-004",
+    "ACR-DOC-005", "ACR-DOC-006", "ACR-DOC-007", "ACR-DOC-008",
+    "ACR-PAGE-001", "ACR-PAGE-002", "ACR-PAGE-003", "ACR-PAGE-004",
+    "ACR-PAGE-005", "ACR-PAGE-006", "ACR-PAGE-007", "ACR-PAGE-008",
+    "ACR-PAGE-009", "ACR-FORM-001", "ACR-FORM-002", "ACR-ALT-001",
+    "ACR-ALT-002", "ACR-ALT-003", "ACR-ALT-004", "ACR-ALT-005",
+    "ACR-TABLE-001", "ACR-TABLE-002", "ACR-TABLE-003", "ACR-TABLE-004",
+    "ACR-TABLE-005", "ACR-LIST-001", "ACR-LIST-002", "ACR-HEAD-001",
+)
 SOURCE_DOCUMENT = "ADA Title II Web Accessibility.docx"
 SOURCE_REQUIREMENTS = {
     "scope": "Scope and Applicability — PDF documents are in scope for public-entity web accessibility.",
@@ -123,6 +134,79 @@ def _page_image_count(page: Any) -> int:
         return 0
 
 
+def _structure_nodes(value: Any) -> list[tuple[DictionaryObject, str]]:
+    nodes: list[tuple[DictionaryObject, str]] = []
+    visited: set[tuple[int, int]] = set()
+
+    def walk(item: Any, parent_role: str = "") -> None:
+        if isinstance(item, IndirectObject):
+            key = (item.idnum, item.generation)
+            if key in visited:
+                return
+            visited.add(key)
+            item = item.get_object()
+        if isinstance(item, DictionaryObject):
+            role = _text(item.get("/S")).lstrip("/")
+            if role:
+                nodes.append((item, parent_role))
+                parent_role = role
+            child = item.get("/K")
+            if child is not None:
+                walk(child, parent_role)
+        elif isinstance(item, (ArrayObject, list, tuple)):
+            for child in item:
+                walk(child, parent_role)
+
+    walk(value)
+    return nodes
+
+
+def _annotations(reader: PdfReader) -> list[DictionaryObject]:
+    result: list[DictionaryObject] = []
+    for page in reader.pages:
+        values = _resolve(page.get("/Annots"))
+        if isinstance(values, (ArrayObject, list, tuple)):
+            result.extend(value for item in values if isinstance((value := _resolve(item)), DictionaryObject))
+    return result
+
+
+def _has_javascript(root: DictionaryObject, reader: PdfReader) -> bool:
+    names = _resolve(root.get("/Names"))
+    if isinstance(names, DictionaryObject) and names.get("/JavaScript") is not None:
+        return True
+    if root.get("/OpenAction") is not None or root.get("/AA") is not None:
+        return True
+    return any(page.get("/AA") is not None for page in reader.pages)
+
+
+def _page_content_is_tagged(page: Any, reader: PdfReader) -> bool:
+    try:
+        operations = ContentStream(page.get_contents(), reader).operations
+    except Exception:
+        return False
+    marked_depth = 0
+    content_operators = {b"Tj", b"TJ", b"'", b'"', b"Do", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"sh", b"INLINE IMAGE"}
+    for _, operator in operations:
+        if operator in {b"BMC", b"BDC"}:
+            marked_depth += 1
+        elif operator == b"EMC":
+            marked_depth = max(0, marked_depth - 1)
+        elif operator in content_operators and marked_depth == 0:
+            return False
+    return True
+
+
+def _contains_object_reference(value: Any) -> bool:
+    value = _resolve(value)
+    if isinstance(value, DictionaryObject):
+        if value.get("/Type") == "/OBJR":
+            return True
+        return _contains_object_reference(value.get("/K")) if value.get("/K") is not None else False
+    if isinstance(value, (ArrayObject, list, tuple)):
+        return any(_contains_object_reference(item) for item in value)
+    return False
+
+
 def _finding(
     check_id: str,
     category: str,
@@ -145,7 +229,8 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         raise ValueError("Input must be a PDF file.")
 
     reader = PdfReader(str(path), strict=False)
-    if reader.is_encrypted:
+    was_encrypted = reader.is_encrypted
+    if was_encrypted:
         try:
             reader.decrypt("")
         except Exception as exc:
@@ -154,59 +239,16 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     root = _catalog(reader)
     page_count = len(reader.pages)
     findings: list[Finding] = []
-
-    # Document-level semantics
     mark_info = _resolve(root.get("/MarkInfo"))
     marked = isinstance(mark_info, DictionaryObject) and bool(mark_info.get("/Marked"))
-    findings.append(_finding(
-        "DOC-001", "Document", "Tagged PDF", "pass" if marked else "fail", "critical",
-        "The catalog identifies the document as tagged." if marked else "The catalog does not set /MarkInfo /Marked to true.",
-        "Create a properly tagged PDF and verify the tag tree in an accessibility checker."
-    ))
-
     struct_root = root.get("/StructTreeRoot")
     has_structure = struct_root is not None
-    findings.append(_finding(
-        "DOC-002", "Document", "Logical structure tree", "pass" if has_structure else "fail", "critical",
-        "A structure tree is present." if has_structure else "No /StructTreeRoot was found.",
-        "Add and validate semantic tags for headings, paragraphs, lists, tables, links, and figures."
-    ))
-
     language = _text(root.get("/Lang"))
-    findings.append(_finding(
-        "DOC-003", "Document", "Default document language", "pass" if language else "fail", "high",
-        f"Document language is {language}." if language else "No default document language is declared.",
-        "Set the document language (for example, en-US) and identify language changes in the content."
-    ))
-
     metadata = reader.metadata
     title = _text(getattr(metadata, "title", None) if metadata else None)
-    findings.append(_finding(
-        "DOC-004", "Document", "Meaningful document title", "pass" if title else "fail", "medium",
-        f"Metadata title: {title}" if title else "The document metadata has no title.",
-        "Add a concise, meaningful title in the PDF document properties."
-    ))
-
     viewer_prefs = _resolve(root.get("/ViewerPreferences"))
     display_title = isinstance(viewer_prefs, DictionaryObject) and bool(viewer_prefs.get("/DisplayDocTitle"))
-    findings.append(_finding(
-        "DOC-005", "Document", "Display document title", "pass" if display_title else "warning", "low",
-        "Viewer preference DisplayDocTitle is enabled." if display_title else "DisplayDocTitle is not enabled.",
-        "Configure the initial view to display the document title rather than the file name."
-    ))
-
     outline_count = _outline_count(reader)
-    outline_status = "not_applicable" if page_count < 10 else ("pass" if outline_count else "warning")
-    findings.append(_finding(
-        "NAV-001", "Navigation", "Bookmarks for long documents", outline_status, "medium",
-        f"Found {outline_count} bookmark(s)." if outline_count else (
-            "Fewer than 10 pages; bookmarks are not required by this screening rule."
-            if page_count < 10 else "No bookmarks were found in this long document."
-        ),
-        "Add hierarchical bookmarks that reflect the document's major sections."
-    ))
-
-    # Extractability and likely scanned pages
     no_text_pages: list[int] = []
     scanned_pages: list[int] = []
     extraction_errors: list[int] = []
@@ -223,57 +265,15 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
             no_text_pages.append(page_number)
             if page_images > 0:
                 scanned_pages.append(page_number)
-
-    if extraction_errors:
-        extract_status = "fail"
-        extract_details = f"Text extraction failed on {len(extraction_errors)} page(s)."
-    elif no_text_pages:
-        extract_status = "warning"
-        extract_details = f"No extractable text was found on {len(no_text_pages)} page(s)."
-    else:
-        extract_status = "pass"
-        extract_details = "Extractable text was found on every page."
-    findings.append(_finding(
-        "CONT-001", "Content", "Text is extractable", extract_status, "high", extract_details,
-        "Ensure meaningful content is real text, uses embedded Unicode fonts, and is included in the tag tree.",
-        extraction_errors or no_text_pages or None,
-    ))
-    findings.append(_finding(
-        "CONT-002", "Content", "Scanned pages have OCR", "warning" if scanned_pages else "pass", "high",
-        f"{len(scanned_pages)} image-only page(s) may require OCR." if scanned_pages else "No image-only pages were detected.",
-        "Run OCR, correct recognition errors, and add a verified semantic tag structure.",
-        scanned_pages or None,
-    ))
-
-    # Figure alternatives in the structure tree
-    figures = 0
-    figures_without_alt = 0
-    if has_structure:
-        for element in _walk_structure(struct_root):
-            if _text(element.get("/S")).lstrip("/") == "Figure":
-                figures += 1
-                if not (_text(element.get("/Alt")) or _text(element.get("/ActualText"))):
-                    figures_without_alt += 1
-    if figures_without_alt:
-        figure_status = "fail"
-        figure_details = f"Found {figures} tagged figure(s); {figures_without_alt} lack /Alt or /ActualText."
-    elif figures:
-        figure_status = "pass"
-        figure_details = f"Found {figures} tagged figure(s), each with /Alt or /ActualText."
-    elif image_count:
-        figure_status = "warning"
-        figure_details = f"Found {image_count} image object(s), but no tagged Figure elements; text alternatives cannot be verified."
-    else:
-        figure_status = "not_applicable"
-        figure_details = "No image objects or tagged Figure elements were found."
-    findings.append(_finding(
-        "IMG-001", "Images", "Tagged figures have alternate text", figure_status, "high",
-        figure_details,
-        "Add concise equivalent text to informative figures and mark decorative images as artifacts.",
-        source_requirement=SOURCE_REQUIREMENTS["alt"],
-    ))
-
-    # Interactive form descriptions
+    nodes = _structure_nodes(struct_root) if has_structure else []
+    roles = [(_text(element.get("/S")).lstrip("/"), element, parent) for element, parent in nodes]
+    figures = [element for role, element, _ in roles if role == "Figure"]
+    figures_without_alt = [element for element in figures if not (_text(element.get("/Alt")) or _text(element.get("/ActualText")))]
+    annotations = _annotations(reader)
+    links = [item for item in annotations if item.get("/Subtype") == "/Link"]
+    media = [item for item in annotations if item.get("/Subtype") in {"/Movie", "/Sound", "/RichMedia", "/Screen"}]
+    widgets = [item for item in annotations if item.get("/Subtype") == "/Widget"]
+    has_scripts = _has_javascript(root, reader)
     try:
         fields = reader.get_fields() or {}
     except Exception:
@@ -282,33 +282,76 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         str(name) for name, field in fields.items()
         if isinstance(field, dict) and not (_text(field.get("/TU")) or _text(field.get("/T")))
     ]
-    form_status = "not_applicable" if not fields else ("pass" if not missing_descriptions else "fail")
-    findings.append(_finding(
-        "FORM-001", "Forms", "Form controls have accessible names", form_status, "high",
-        f"Found {len(fields)} field(s); {len(missing_descriptions)} lack a tooltip or field name." if fields else "No AcroForm fields were found.",
-        "Give every form control a unique, descriptive tooltip/name and verify keyboard order and error handling.",
-        source_requirement=SOURCE_REQUIREMENTS["keyboard"],
-    ))
-
-    # Essential checks that require human judgment
-    manual_checks = [
-        ("MAN-001", "Structure", "Tag accuracy and reading order", "critical", "Verify tags match the visual content and reading order is logical.", SOURCE_REQUIREMENTS["pdfua"]),
-        ("MAN-002", "Structure", "Heading hierarchy", "high", "Verify headings are descriptive and levels do not skip illogically.", SOURCE_REQUIREMENTS["pdfua"]),
-        ("MAN-003", "Tables", "Table headers and associations", "high", "Verify data tables use TH/TD tags, scope or header associations, and regular structures.", SOURCE_REQUIREMENTS["pdfua"]),
-        ("MAN-004", "Visual", "Minimum 4.5:1 color contrast", "high", "Measure text contrast and confirm a ratio of at least 4.5:1.", SOURCE_REQUIREMENTS["contrast"]),
-        ("MAN-005", "Links", "Descriptive link purpose", "medium", "Verify each link communicates its purpose in context and is correctly tagged.", SOURCE_REQUIREMENTS["pdfua"]),
-        ("MAN-006", "Content", "Meaningful text alternatives", "high", "Judge whether text alternatives convey the purpose of every item of non-text content.", SOURCE_REQUIREMENTS["alt"]),
-        ("MAN-007", "Forms", "Keyboard navigation and operation", "high", "Test tab order and confirm that all form controls can be reached and operated with a keyboard.", SOURCE_REQUIREMENTS["keyboard"]),
-        ("MAN-008", "Assistive technology", "Keyboard and screen-reader usability", "critical", "Test keyboard-only interaction and representative screen readers such as NVDA, JAWS, or VoiceOver.", SOURCE_REQUIREMENTS["keyboard"]),
-    ]
-    findings.extend(
-        _finding(check_id, category, requirement, "manual", severity, "Automated inspection cannot determine this requirement.", remediation, source_requirement=source)
-        for check_id, category, requirement, severity, remediation, source in manual_checks
+    image_only = bool(page_count) and len(scanned_pages) == page_count
+    fully_tagged = marked and has_structure
+    tagged_pages = [number for number, page in enumerate(reader.pages, 1) if _page_content_is_tagged(page, reader)] if fully_tagged else []
+    tabs_pages = [number for number, page in enumerate(reader.pages, 1) if page.get("/Tabs") == "/S"]
+    tagged_annotations = [item for item in annotations if item.get("/StructParent") is not None]
+    permissions = reader.user_access_permissions
+    accessibility_allowed = not was_encrypted or (
+        permissions is not None and bool(permissions & UserAccessPermissions.EXTRACT_TEXT_AND_GRAPHICS)
     )
+
+    def add(check_id: str, category: str, name: str, status: str, severity: str, details: str, remediation: str, pages: list[int] | None = None, source: str = SOURCE_REQUIREMENTS["pdfua"]) -> None:
+        findings.append(_finding(check_id, category, name, status, severity, details, remediation, pages, source))
+
+    add("ACR-DOC-001", "Document", "Accessibility permission flag", "pass" if accessibility_allowed else "fail", "high", "The document permits assistive-technology text and graphics extraction." if accessibility_allowed else "The encrypted document does not grant assistive-technology extraction permission.", "Remove security restrictions that prevent assistive-technology access.")
+    add("ACR-DOC-002", "Document", "Image-only PDF", "fail" if image_only else "pass", "critical", f"All {page_count} page(s) are image-only." if image_only else "The document is not entirely image-only.", "Run OCR and verify the recognized text and reading order.", scanned_pages or None)
+    add("ACR-DOC-003", "Document", "Tagged PDF", "pass" if fully_tagged else "fail", "critical", "The catalog identifies a tagged document with a structure tree." if fully_tagged else "The document lacks a complete tagged-document declaration and structure tree.", "Create and validate a semantic structure tree.")
+    add("ACR-DOC-004", "Document", "Logical Reading Order", "manual", "critical", "Reading-order quality requires human and assistive-technology review.", "Verify the tag order against the intended visual and spoken order.")
+    add("ACR-DOC-005", "Document", "Primary language", "pass" if language else "fail", "high", f"Document language is {language}." if language else "No default document language is declared.", "Set the document language and identify language changes.")
+    add("ACR-DOC-006", "Document", "Title", "pass" if title and display_title else "fail", "medium", f"Metadata title is '{title}' and title display is enabled." if title and display_title else "A metadata title and title-bar display preference are both required.", "Add a meaningful title and display it in the title bar.")
+    add("ACR-DOC-007", "Document", "Bookmarks", "not_applicable" if page_count < 10 else ("pass" if outline_count else "fail"), "medium", f"Found {outline_count} bookmark(s)." if outline_count else ("Fewer than 10 pages; this rule does not apply." if page_count < 10 else "No bookmarks were found in this long document."), "Add hierarchical bookmarks for major sections.")
+    add("ACR-DOC-008", "Document", "Color contrast", "manual", "high", "Static PDF inspection cannot reliably establish visual contrast for all content.", "Measure foreground/background contrast and correct failures.", source=SOURCE_REQUIREMENTS["contrast"])
+
+    add("ACR-PAGE-001", "Page Content", "Tagged content", "pass" if len(tagged_pages) == page_count and page_count else "fail", "critical", f"All {page_count} page(s) have marked content." if len(tagged_pages) == page_count and page_count else f"Marked-content coverage was verified on {len(tagged_pages)} of {page_count} page(s).", "Associate meaningful page content with structure elements and mark layout content as artifacts.")
+    add("ACR-PAGE-002", "Page Content", "Tagged annotations", "pass" if len(tagged_annotations) == len(annotations) else "fail", "high", f"{len(tagged_annotations)} of {len(annotations)} annotation(s) are structure-associated." if annotations else "No annotations require tagging.", "Associate each meaningful annotation with the structure tree.")
+    add("ACR-PAGE-003", "Page Content", "Tab order", "pass" if len(tabs_pages) == page_count and page_count else "fail", "high", f"All {page_count} page(s) use structure order." if len(tabs_pages) == page_count and page_count else f"Structure-based tab order is set on {len(tabs_pages)} of {page_count} page(s).", "Set page tab order to use the document structure.")
+    add("ACR-PAGE-004", "Page Content", "Character encoding", "fail" if extraction_errors else "pass", "high", "Text extraction completed without errors." if not extraction_errors else f"Text extraction failed on {len(extraction_errors)} page(s).", "Use embedded Unicode-compatible fonts and valid character mappings.", extraction_errors or None)
+    add("ACR-PAGE-005", "Page Content", "Tagged multimedia", "pass" if not media or all(item.get("/StructParent") is not None for item in media) else "fail", "medium", f"Found {len(media)} multimedia annotation(s)." if media else "No multimedia objects require tagging.", "Tag multimedia and provide accessible alternatives.")
+    add("ACR-PAGE-006", "Page Content", "Screen flicker", "manual" if media or has_scripts else "pass", "high", "Dynamic content requires manual flicker testing." if media or has_scripts else "No dynamic multimedia or scripts were detected.", "Verify that dynamic content does not flash above accessibility thresholds.")
+    add("ACR-PAGE-007", "Page Content", "Scripts", "manual" if has_scripts else "pass", "high", "Scripts are present and require keyboard and assistive-technology testing." if has_scripts else "No document-level or page-level scripts were detected.", "Remove inaccessible scripts or provide an accessible equivalent.")
+    add("ACR-PAGE-008", "Page Content", "Timed responses", "manual" if has_scripts else "pass", "high", "Scripts may impose timing and require manual testing." if has_scripts else "No scripts capable of imposing timed responses were detected.", "Allow users to extend, disable, or avoid time limits.")
+    add("ACR-PAGE-009", "Page Content", "Navigation links", "manual" if links else "pass", "medium", f"Found {len(links)} link annotation(s); repetition and purpose require review." if links else "No link annotations require repetition review.", "Verify link purpose and remove unnecessarily repetitive navigation.")
+
+    add("ACR-FORM-001", "Forms", "Tagged form fields", "pass" if not widgets or all(item.get("/StructParent") is not None for item in widgets) else "fail", "high", f"Found {len(widgets)} form widget(s)." if widgets else "No form widgets require tagging.", "Associate each form widget with a Form structure element.", source=SOURCE_REQUIREMENTS["keyboard"])
+    add("ACR-FORM-002", "Forms", "Field descriptions", "pass" if not missing_descriptions else "fail", "high", f"Found {len(fields)} field(s); {len(missing_descriptions)} lack a tooltip or field name." if fields else "No form fields require descriptions.", "Give every form control a unique descriptive tooltip or name.", source=SOURCE_REQUIREMENTS["keyboard"])
+
+    alt_elements = [element for _, element, _ in roles if _text(element.get("/Alt")) or _text(element.get("/ActualText"))]
+    nested_alt = [element for element in alt_elements if any(_text(child.get("/Alt")) or _text(child.get("/ActualText")) for child in _walk_structure(element.get("/K")))]
+    alt_without_content = [element for element in alt_elements if element.get("/K") is None]
+    alt_hiding_annotation = [element for element in alt_elements if _contains_object_reference(element.get("/K"))]
+    other_alt_missing = [element for role, element, _ in roles if role in {"Formula", "Form"} and not (_text(element.get("/Alt")) or _text(element.get("/ActualText")))]
+    add("ACR-ALT-001", "Alternate Text", "Figures alternate text", "not_applicable" if not figures and not image_count else ("pass" if figures and not figures_without_alt else "fail"), "high", f"Found {len(figures)} tagged figure(s); {len(figures_without_alt)} lack alternate text." if figures else f"Found {image_count} image object(s) without verifiable Figure tags.", "Add concise equivalent text to informative figures and artifact decorative images.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-002", "Alternate Text", "Nested alternate text", "fail" if nested_alt else "pass", "medium", f"Found {len(nested_alt)} element(s) with nested alternate text." if nested_alt else "No nested alternate-text conflicts were detected.", "Keep alternate text on the appropriate outermost semantic element.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-003", "Alternate Text", "Associated with content", "fail" if alt_without_content else "pass", "high", f"Found {len(alt_without_content)} alternate-text element(s) without associated content." if alt_without_content else "Every detected alternate-text entry is associated with content.", "Associate alternate text with actual marked content.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-004", "Alternate Text", "Hides annotation", "fail" if alt_hiding_annotation else "pass", "high", f"Found {len(alt_hiding_annotation)} alternate-text element(s) containing annotation references." if alt_hiding_annotation else "No alternate text was found hiding annotation references.", "Move annotation objects outside alternate-text containers.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-005", "Alternate Text", "Other elements alternate text", "fail" if other_alt_missing else "pass", "high", f"Found {len(other_alt_missing)} non-Figure element(s) missing alternate text." if other_alt_missing else "No other tagged elements were found missing required alternate text.", "Add equivalent text to formulas and other non-text semantic elements.", source=SOURCE_REQUIREMENTS["alt"])
+
+    table_roles = [(role, element, parent) for role, element, parent in roles if role in {"Table", "THead", "TBody", "TFoot", "TR", "TH", "TD"}]
+    tables = [element for role, element, _ in table_roles if role == "Table"]
+    invalid_rows = [element for role, element, parent in table_roles if role == "TR" and parent not in {"Table", "THead", "TBody", "TFoot"}]
+    invalid_cells = [element for role, element, parent in table_roles if role in {"TH", "TD"} and parent != "TR"]
+    header_count = sum(role == "TH" for role, _, _ in table_roles)
+    add("ACR-TABLE-001", "Tables", "Rows", "not_applicable" if not tables else ("fail" if invalid_rows else "pass"), "high", f"Found {len(tables)} table(s) and {len(invalid_rows)} invalid row parent(s)." if tables else "No tagged tables were detected.", "Place each TR under Table, THead, TBody, or TFoot.")
+    add("ACR-TABLE-002", "Tables", "TH and TD", "not_applicable" if not tables else ("fail" if invalid_cells else "pass"), "high", f"Found {len(invalid_cells)} cell(s) outside TR elements." if tables else "No tagged tables were detected.", "Place each TH and TD directly under a TR.")
+    add("ACR-TABLE-003", "Tables", "Headers", "not_applicable" if not tables else ("pass" if header_count else "fail"), "high", f"Found {header_count} table header cell(s)." if tables else "No tagged tables were detected.", "Add TH cells and valid header associations.")
+    add("ACR-TABLE-004", "Tables", "Regularity", "not_applicable" if not tables else "manual", "high", "No tagged tables were detected." if not tables else "Spans and row/column regularity require semantic table analysis.", "Verify consistent rows, columns, spans, and header associations.")
+    add("ACR-TABLE-005", "Tables", "Summary", "not_applicable" if not tables else "skipped", "low", "No tagged tables were detected." if not tables else "Table-summary quality is not automatically evaluated.", "Add a summary when needed to explain a complex table.")
+
+    lists = [element for role, element, _ in roles if role == "L"]
+    invalid_items = [element for role, element, parent in roles if role == "LI" and parent != "L"]
+    invalid_list_parts = [element for role, element, parent in roles if role in {"Lbl", "LBody"} and parent != "LI"]
+    add("ACR-LIST-001", "Lists", "List items", "not_applicable" if not lists else ("fail" if invalid_items else "pass"), "high", f"Found {len(lists)} list(s) and {len(invalid_items)} invalid LI parent(s)." if lists else "No tagged lists were detected.", "Place each LI directly under an L element.")
+    add("ACR-LIST-002", "Lists", "Lbl and LBody", "not_applicable" if not lists else ("fail" if invalid_list_parts else "pass"), "high", f"Found {len(invalid_list_parts)} Lbl/LBody element(s) outside LI." if lists else "No tagged lists were detected.", "Place Lbl and LBody elements directly under LI.")
+
+    heading_levels = [int(role[1:]) for role, _, _ in roles if len(role) == 2 and role.startswith("H") and role[1].isdigit()]
+    heading_skip = any(current > previous + 1 for previous, current in zip(heading_levels, heading_levels[1:]))
+    add("ACR-HEAD-001", "Headings", "Appropriate nesting", "not_applicable" if not heading_levels else ("fail" if heading_skip else "pass"), "high", f"Heading sequence: {', '.join(f'H{level}' for level in heading_levels)}." if heading_levels else "No tagged headings were detected.", "Use descriptive headings with levels that do not skip illogically.")
 
     score = _calculate_score(findings)
     rating = "Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected"
-    summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "not_applicable")}
+    summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "skipped", "not_applicable")}
     return AuditReport(
         file=str(path),
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -330,7 +373,7 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
 
 
 def _calculate_score(findings: list[Finding]) -> int:
-    automated = [item for item in findings if item.status not in {"manual", "not_applicable"}]
+    automated = [item for item in findings if item.status not in {"manual", "skipped", "not_applicable"}]
     possible = sum(WEIGHTS[item.severity] for item in automated)
     earned = sum(
         WEIGHTS[item.severity] * ({"pass": 1.0, "warning": 0.5, "fail": 0.0}[item.status])
@@ -361,7 +404,7 @@ def write_html(report: AuditReport, output_path: str | Path, remediation_url: st
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
-    labels = {"pass": "Pass", "fail": "Fail", "warning": "Warning", "manual": "Manual review", "not_applicable": "N/A"}
+    labels = {"pass": "Pass", "fail": "Fail", "warning": "Warning", "manual": "Manual review", "skipped": "Skipped", "not_applicable": "N/A"}
     rows = []
     for item in report.findings:
         pages = f" Pages: {', '.join(map(str, item.pages))}." if item.pages else ""
@@ -379,7 +422,7 @@ def write_html(report: AuditReport, output_path: str | Path, remediation_url: st
                 remediation_panel = f"""
 <section class="panel action" aria-labelledby="remediate-heading">
     <h2 id="remediate-heading">Apply automatic remediation?</h2>
-    <p>A new PDF will be created; the source file will not be changed. Safe metadata and viewer fixes will be applied. A fully image-only document can also receive a minimal Document and Figure structure so its existing page content is tagged. OCR, alternate-text meaning, detailed semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
+    <p>A new PDF will be created; the source file will not be changed. Safe metadata and viewer fixes will be applied. An untagged document can also receive a baseline structure: text objects become paragraphs, images become figures, and layout graphics become artifacts. OCR, alternate-text meaning, detailed semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
     <form method="post" action="{html.escape(remediation_url, quote=True)}" onsubmit="return confirm('Create a remediated copy now? The original will not be overwritten.');">
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
         <button type="submit">Yes, apply remediation</button>

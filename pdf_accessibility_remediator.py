@@ -68,11 +68,24 @@ def _page_has_image(page: Any) -> bool:
     )
 
 
-def _tag_image_only_document(writer: PdfWriter) -> bool:
-    """Add a minimal, valid structure tree when every page is a scanned image."""
+def _xobject_subtype(page: Any, name: Any) -> Any:
+    resources = _resolve(page.get("/Resources"))
+    if not isinstance(resources, DictionaryObject):
+        return None
+    xobjects = _resolve(resources.get("/XObject"))
+    if not isinstance(xobjects, DictionaryObject):
+        return None
+    xobject = _resolve(xobjects.get(name))
+    return xobject.get("/Subtype") if isinstance(xobject, DictionaryObject) else None
+
+
+def _tag_untagged_document(writer: PdfWriter) -> bool:
+    """Add a baseline structure tree to an untagged image or mixed-content PDF."""
     pages = list(writer.pages)
-    if not pages or any((page.extract_text() or "").strip() or not _page_has_image(page) for page in pages):
+    page_text = [(page.extract_text() or "").strip() for page in pages]
+    if not pages or not any(text or _page_has_image(page) for page, text in zip(pages, page_text)):
         return False
+    image_only = all(not text and _page_has_image(page) for page, text in zip(pages, page_text))
 
     structure_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
     structure_root_ref = writer._add_object(structure_root)
@@ -90,27 +103,84 @@ def _tag_image_only_document(writer: PdfWriter) -> bool:
         if page_ref is None:
             raise ValueError("Unable to reference a page while creating the PDF structure tree.")
 
-        figure = DictionaryObject({
-            NameObject("/Type"): NameObject("/StructElem"),
-            NameObject("/S"): NameObject("/Figure"),
-            NameObject("/P"): document_ref,
-            NameObject("/Pg"): page_ref,
-            NameObject("/K"): NumberObject(0),
-        })
-        figure_ref = writer._add_object(figure)
-        document_element[NameObject("/K")].append(figure_ref)
-
         content = ContentStream(page.get_contents(), writer)
-        content.operations.insert(0, (
-            [NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(0)})],
-            b"BDC",
-        ))
-        content.operations.append(([], b"EMC"))
+        page_elements = ArrayObject()
+
+        def add_element(role: str) -> int:
+            mcid = len(page_elements)
+            element = DictionaryObject({
+                NameObject("/Type"): NameObject("/StructElem"),
+                NameObject("/S"): NameObject(role),
+                NameObject("/P"): document_ref,
+                NameObject("/Pg"): page_ref,
+                NameObject("/K"): NumberObject(mcid),
+            })
+            element_ref = writer._add_object(element)
+            document_element[NameObject("/K")].append(element_ref)
+            page_elements.append(element_ref)
+            return mcid
+
+        if image_only:
+            mcid = add_element("/Figure")
+            content.operations.insert(0, (
+                [NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})],
+                b"BDC",
+            ))
+            content.operations.append(([], b"EMC"))
+        else:
+            tagged_operations: list[tuple[Any, bytes]] = []
+            artifact_open = False
+            text_open = False
+
+            def open_artifact() -> None:
+                nonlocal artifact_open
+                if not artifact_open:
+                    tagged_operations.append(([NameObject("/Artifact")], b"BMC"))
+                    artifact_open = True
+
+            def close_artifact() -> None:
+                nonlocal artifact_open
+                if artifact_open:
+                    tagged_operations.append(([], b"EMC"))
+                    artifact_open = False
+
+            for operands, operator in content.operations:
+                if operator == b"BT":
+                    close_artifact()
+                    mcid = add_element("/P")
+                    tagged_operations.append((
+                        [NameObject("/P"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})],
+                        b"BDC",
+                    ))
+                    tagged_operations.append((operands, operator))
+                    text_open = True
+                elif operator == b"ET" and text_open:
+                    tagged_operations.append((operands, operator))
+                    tagged_operations.append(([], b"EMC"))
+                    text_open = False
+                elif operator == b"Do" and not text_open and operands and _xobject_subtype(page, operands[0]) == "/Image":
+                    close_artifact()
+                    mcid = add_element("/Figure")
+                    tagged_operations.extend((
+                        ([NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"),
+                        (operands, operator),
+                        ([], b"EMC"),
+                    ))
+                else:
+                    if not text_open:
+                        open_artifact()
+                    tagged_operations.append((operands, operator))
+
+            if text_open:
+                tagged_operations.append(([], b"EMC"))
+            close_artifact()
+            content.operations = tagged_operations
+
         page.replace_contents(content)
         page[NameObject("/StructParents")] = NumberObject(page_index)
         page[NameObject("/Tabs")] = NameObject("/S")
 
-        parent_tree_numbers.extend((NumberObject(page_index), ArrayObject([figure_ref])))
+        parent_tree_numbers.extend((NumberObject(page_index), page_elements))
 
     parent_tree = DictionaryObject({NameObject("/Nums"): parent_tree_numbers})
     structure_root[NameObject("/K")] = document_ref
@@ -190,10 +260,10 @@ def remediate_from_json(
         raise ValueError("The remediated output must not overwrite the source PDF.")
 
     before_by_id = {item.check_id: item for item in before.findings}
-    required_checks = {"DOC-003", "DOC-004"}
-    missing_checks = required_checks.difference(before_by_id)
-    if missing_checks:
-        raise ValueError(f"Audit JSON is missing required checks: {', '.join(sorted(missing_checks))}")
+    language_check = before_by_id.get("ACR-DOC-005") or before_by_id.get("DOC-003")
+    title_check = before_by_id.get("ACR-DOC-006") or before_by_id.get("DOC-004")
+    if language_check is None or title_check is None:
+        raise ValueError("Audit JSON is missing the language or title check.")
 
     reader = PdfReader(str(source), strict=False)
     if reader.is_encrypted:
@@ -206,14 +276,14 @@ def remediate_from_json(
     writer.clone_document_from_reader(reader)
     root = writer._root_object
 
-    if before_by_id["DOC-003"].status != "pass":
+    if language_check.status != "pass":
         root[NameObject("/Lang")] = TextStringObject(default_language)
-    if before_by_id["DOC-004"].status != "pass":
+    if title_check.status != "pass":
         title = source.stem.replace("_", " ").replace("-", " ").strip() or "Accessible document"
         writer.add_metadata({"/Title": title})
 
     if root.get("/StructTreeRoot") is None:
-        _tag_image_only_document(writer)
+        _tag_untagged_document(writer)
 
     viewer_prefs = _resolve(root.get("/ViewerPreferences"))
     if not isinstance(viewer_prefs, DictionaryObject):
@@ -233,10 +303,24 @@ def remediate_from_json(
     after_by_id = {item.check_id: item for item in after.findings}
     items: list[RemediationItem] = []
     for original in before.findings:
-        if original.status in {"pass", "not_applicable"}:
-            continue
         updated = after_by_id.get(original.check_id)
-        if original.status == "manual":
+        if original.status == "pass":
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "passed",
+                "The rule passed before remediation and remains unchanged.",
+                original.source_requirement,
+            ))
+        elif original.status in {"not_applicable", "skipped"}:
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "not_applicable",
+                original.details,
+                original.source_requirement,
+            ))
+        elif original.status == "manual" or (updated is not None and updated.status == "manual"):
             items.append(RemediationItem(
                 original.check_id,
                 original.requirement,
@@ -280,7 +364,13 @@ def write_remediation_html(report: RemediationReport, output_path: str | Path, d
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
-    labels = {"success": "Remediated", "failed": "Not remediated", "manual": "Manual review"}
+    labels = {
+        "success": "Remediated",
+        "failed": "Not remediated",
+        "manual": "Manual review",
+        "passed": "Already passed",
+        "not_applicable": "N/A or skipped",
+    }
     rows = "".join(
         f"""<article class="finding {e(item.status)}"><div class="finding-head"><span class="badge">{e(labels[item.status])}</span><span class="check-id">{e(item.check_id)}</span></div><h3>{e(item.requirement)}</h3><p><strong>Source requirement:</strong> {e(item.source_requirement)}</p><p>{e(item.details)}</p></article>"""
         for item in report.items

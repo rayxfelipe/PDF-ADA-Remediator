@@ -15,9 +15,9 @@ The encoded screening policy was derived from a project-specific source document
 
 The source policy document is intentionally excluded from this public repository. Its relevant screening requirements are represented in the application as named rules, and every finding identifies the source requirement used by that rule.
 
-The automated audit checks PDF tagging, logical structure, document language, title metadata, title-display preferences, bookmarks, extractable text, likely scanned pages, figure alternatives, and form-field names. Requirements that cannot be established reliably through static inspection—such as semantic accuracy, reading order, heading quality, table associations, meaningful alternate text, keyboard usability, screen-reader behavior, and visual contrast—are reported as manual reviews.
+The automated audit reports the same 32 named rule areas shown by the Acrobat accessibility report: document properties, page-content tagging, forms, alternate text, tables, lists, and heading nesting. Each rule is reported as pass, fail, manual review, skipped, or not applicable. The checks are independently implemented with `pypdf`; they do not invoke or reproduce Adobe's proprietary checker, so results can differ where Acrobat uses undocumented logic.
 
-The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order. For a document in which every page is an image with no extractable text, it can add a minimal `Document > Figure` structure tree and associate each page's existing content with its Figure tag. It does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
+The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order. For an untagged document, it can add a baseline structure tree that tags text objects as paragraphs, image draws as figures, and layout graphics as artifacts. Image-only pages receive a page-level Figure tag. It does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
 
 > This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
 
@@ -79,7 +79,7 @@ The two input paths shown above are supported as follows:
 
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
 
-Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, structured tab order, and minimal page-level Figure tagging for fully image-only documents. It does **not** invent OCR text or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance. The remediation report cites the controlling source requirement and identifies unsuccessful and manual work.
+Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, structured tab order, and baseline paragraph, figure, and artifact tagging for untagged documents. After remediation, all 32 rules appear in the result report as already passed, remediated, unresolved, manual, skipped, or not applicable. The application does **not** invent OCR text or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance.
 
 Run only the audit:
 
