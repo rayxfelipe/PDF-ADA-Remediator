@@ -9,6 +9,7 @@ local.settings.json
 *.pdf
 *.docx
 pdf_files/
+Acrobat Accessibility Report/
 accessibility-report*.html
 accessibility-report*.json
 *_remediated.pdf
