@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from pdf_accessibility_audit import AuditReport, audit_pdf, write_html, write_json
+from pdf_accessibility_audit import AUDIT_REPORTS_DIR, REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, write_html, write_json
 from pdf_accessibility_remediator import RemediationReport, remediate_from_json, write_remediation_html
 
 
@@ -129,10 +129,10 @@ def serve_workflow(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Display a PDF audit and remediate only after confirmation.")
     parser.add_argument("pdf", help="Path to the PDF to audit")
-    parser.add_argument("--audit-json", help="Audit JSON output path; defaults to accessibility-report-<file_name>.json")
-    parser.add_argument("--audit-report", default="accessibility-report.html", help="Audit HTML output path")
-    parser.add_argument("--remediated-output", help="Remediated PDF output path")
-    parser.add_argument("--remediation-report", default="accessibility-report-remediation.html", help="Remediation HTML output path")
+    parser.add_argument("--audit-json", help="Audit JSON output path; defaults under reports/audits")
+    parser.add_argument("--audit-report", default=str(AUDIT_REPORTS_DIR / "accessibility-report.html"), help="Audit HTML output path")
+    parser.add_argument("--remediated-output", help="Remediated PDF output path; defaults under reports/remediated")
+    parser.add_argument("--remediation-report", default=str(REMEDIATION_REPORTS_DIR / "accessibility-report-remediation.html"), help="Remediation HTML output path")
     parser.add_argument("--language", default="en-US", help="Default language used when the audit reports none")
     parser.add_argument("--no-open", action="store_true", help="Do not open the audit report in a browser")
     return parser
@@ -144,9 +144,9 @@ def main() -> int:
     remediated_output = (
         Path(args.remediated_output).expanduser().resolve()
         if args.remediated_output
-        else source.with_name(f"{source.stem}_remediated.pdf")
+        else (REMEDIATION_REPORTS_DIR / f"{source.stem}_remediated.pdf").resolve()
     )
-    audit_json = Path(args.audit_json or f"accessibility-report-{source.stem}.json").expanduser().resolve()
+    audit_json = Path(args.audit_json or AUDIT_REPORTS_DIR / f"accessibility-report-{source.stem}.json").expanduser().resolve()
     audit_html = Path(args.audit_report).expanduser().resolve()
     remediation_html = Path(args.remediation_report).expanduser().resolve()
     try:

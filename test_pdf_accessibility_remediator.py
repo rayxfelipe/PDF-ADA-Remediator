@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -12,7 +13,7 @@ from pypdf.generic import (
     NumberObject,
 )
 
-from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, write_json
+from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_json
 from pdf_accessibility_remediator import _tag_untagged_document, remediate_from_json
 
 
@@ -141,6 +142,38 @@ class ImageOnlyTaggingTests(unittest.TestCase):
         self.assertEqual(statuses["ACR-PAGE-001"], "success")
         self.assertEqual(statuses["ACR-PAGE-003"], "success")
         self.assertEqual(statuses["ACR-ALT-001"], "failed")
+
+    def test_converts_external_markdown_report(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "external.pdf"
+            writer = _image_only_writer()
+            with source.open("wb") as stream:
+                writer.write(stream)
+            canonical = audit_pdf(source)
+            rows = ["| Rule | Severity | Status |", "|---|---|---|"]
+            for finding in canonical.findings:
+                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
+                rows.append(f"| {finding.requirement} | Major | {status} |")
+            rows.extend([
+                "### Failures table",
+                "| Rule | Severity | Pages | Count | Tag path/object | WCAG / Best Practice | Remediation |",
+                "|---|---|---:|---:|---|---|---|",
+                "| Primary language (/Lang on Catalog) | Critical | All | 1 | Catalog /Lang | WCAG 3.1.1 | Set /Lang to en-US. |",
+            ])
+            report_path = root / "external-report.json"
+            report_path.write_text(json.dumps({
+                "fileName": source.name,
+                "remediationReport": "**File name:** external.pdf - 1 page\n\n" + "\n".join(rows),
+            }), encoding="utf-8")
+
+            converted = read_json(report_path)
+
+        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
+        self.assertEqual(converted.page_count, 1)
+        language = next(item for item in converted.findings if item.check_id == "ACR-DOC-005")
+        self.assertEqual(language.status, "fail")
+        self.assertEqual(language.remediation, "Set /Lang to en-US.")
 
 
 if __name__ == "__main__":

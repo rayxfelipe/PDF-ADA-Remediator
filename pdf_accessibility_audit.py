@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import sys
 import webbrowser
 from dataclasses import asdict, dataclass
@@ -52,6 +53,42 @@ ACROBAT_RULE_IDS = (
     "ACR-TABLE-001", "ACR-TABLE-002", "ACR-TABLE-003", "ACR-TABLE-004",
     "ACR-TABLE-005", "ACR-LIST-001", "ACR-LIST-002", "ACR-HEAD-001",
 )
+EXTERNAL_RULE_SPECS = (
+    ("ACR-DOC-001", "Document", "Accessibility permission flag", "high"),
+    ("ACR-DOC-002", "Document", "Image-only PDF", "critical"),
+    ("ACR-DOC-003", "Document", "Tagged PDF", "critical"),
+    ("ACR-DOC-004", "Document", "Logical Reading Order", "critical"),
+    ("ACR-DOC-005", "Document", "Primary language", "high"),
+    ("ACR-DOC-006", "Document", "Title", "medium"),
+    ("ACR-DOC-007", "Document", "Bookmarks", "medium"),
+    ("ACR-DOC-008", "Document", "Color contrast", "high"),
+    ("ACR-PAGE-001", "Page Content", "Tagged content", "critical"),
+    ("ACR-PAGE-002", "Page Content", "Tagged annotations", "high"),
+    ("ACR-PAGE-003", "Page Content", "Tab order", "high"),
+    ("ACR-PAGE-004", "Page Content", "Character encoding", "high"),
+    ("ACR-PAGE-005", "Page Content", "Tagged multimedia", "medium"),
+    ("ACR-PAGE-006", "Page Content", "Screen flicker", "high"),
+    ("ACR-PAGE-007", "Page Content", "Scripts", "high"),
+    ("ACR-PAGE-008", "Page Content", "Timed responses", "high"),
+    ("ACR-PAGE-009", "Page Content", "Navigation links", "medium"),
+    ("ACR-FORM-001", "Forms", "Tagged form fields", "high"),
+    ("ACR-FORM-002", "Forms", "Field descriptions", "high"),
+    ("ACR-ALT-001", "Alternate Text", "Figures alternate text", "high"),
+    ("ACR-ALT-002", "Alternate Text", "Nested alternate text", "medium"),
+    ("ACR-ALT-003", "Alternate Text", "Associated with content", "high"),
+    ("ACR-ALT-004", "Alternate Text", "Hides annotation", "high"),
+    ("ACR-ALT-005", "Alternate Text", "Other elements alternate text", "high"),
+    ("ACR-TABLE-001", "Tables", "Rows", "high"),
+    ("ACR-TABLE-002", "Tables", "TH and TD", "high"),
+    ("ACR-TABLE-003", "Tables", "Headers", "high"),
+    ("ACR-TABLE-004", "Tables", "Regularity", "high"),
+    ("ACR-TABLE-005", "Tables", "Summary", "low"),
+    ("ACR-LIST-001", "Lists", "List items", "high"),
+    ("ACR-LIST-002", "Lists", "Lbl and LBody", "high"),
+    ("ACR-HEAD-001", "Headings", "Appropriate nesting", "high"),
+)
+AUDIT_REPORTS_DIR = Path("reports") / "audits"
+REMEDIATION_REPORTS_DIR = Path("reports") / "remediated"
 SOURCE_DOCUMENT = "ADA Title II Web Accessibility.docx"
 SOURCE_REQUIREMENTS = {
     "scope": "Scope and Applicability — PDF documents are in scope for public-entity web accessibility.",
@@ -389,14 +426,126 @@ def write_json(report: AuditReport, output_path: str | Path) -> Path:
     return path
 
 
+def _external_rule_key(value: str) -> str:
+    value = re.sub(r"\s*[\[(].*$", "", value).strip().lower()
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _markdown_rows(markdown: str) -> list[list[str]]:
+    rows = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped[1:-1].split("|")]
+        if cells and not all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            rows.append(cells)
+    return rows
+
+
+def _source_requirement_for(check_id: str) -> str:
+    if check_id.startswith("ACR-ALT-"):
+        return SOURCE_REQUIREMENTS["alt"]
+    if check_id.startswith("ACR-FORM-"):
+        return SOURCE_REQUIREMENTS["keyboard"]
+    if check_id == "ACR-DOC-008":
+        return SOURCE_REQUIREMENTS["contrast"]
+    return SOURCE_REQUIREMENTS["pdfua"]
+
+
+def _read_external_markdown_report(data: dict[str, Any]) -> AuditReport:
+    file_name = data.get("fileName")
+    markdown = data.get("remediationReport")
+    if not isinstance(file_name, str) or not file_name.strip() or not isinstance(markdown, str):
+        raise ValueError("External report requires string fields 'fileName' and 'remediationReport'.")
+
+    specs_by_key = {
+        _external_rule_key(requirement): (check_id, category, requirement, severity)
+        for check_id, category, requirement, severity in EXTERNAL_RULE_SPECS
+    }
+    status_map = {
+        "passed": "pass",
+        "failed": "fail",
+        "needs manual check": "manual",
+        "manual": "manual",
+        "manual review": "manual",
+        "not applicable": "not_applicable",
+        "n/a": "not_applicable",
+        "skipped": "skipped",
+        "warning": "warning",
+    }
+    statuses: dict[str, str] = {}
+    failure_details: dict[str, tuple[str, list[int] | None, str]] = {}
+    for cells in _markdown_rows(markdown):
+        if len(cells) == 3 and cells[0].lower() != "rule":
+            key = _external_rule_key(cells[0])
+            if key not in specs_by_key:
+                continue
+            status = status_map.get(cells[2].lower())
+            if status is None:
+                raise ValueError(f"Unsupported external status '{cells[2]}' for '{cells[0]}'.")
+            if key in statuses:
+                raise ValueError(f"Duplicate external rule '{cells[0]}'.")
+            statuses[key] = status
+        elif len(cells) == 7 and cells[0].lower() != "rule":
+            key = _external_rule_key(cells[0])
+            if key not in specs_by_key:
+                continue
+            page_numbers = [int(value) for value in re.findall(r"\d+", cells[2])]
+            details = f"External evidence: {cells[4]}. Scope: {cells[2]}; count: {cells[3]}."
+            failure_details[key] = (details, page_numbers or None, cells[6])
+
+    missing = [requirement for _, _, requirement, _ in EXTERNAL_RULE_SPECS if _external_rule_key(requirement) not in statuses]
+    if missing:
+        raise ValueError(f"External report is missing {len(missing)} expected rule(s): {', '.join(missing)}")
+
+    findings = []
+    for check_id, category, requirement, severity in EXTERNAL_RULE_SPECS:
+        key = _external_rule_key(requirement)
+        status = statuses[key]
+        detail, pages, remediation = failure_details.get(
+            key,
+            (f"External report result: {status.replace('_', ' ')}.", None, "Review this rule using the external report guidance."),
+        )
+        findings.append(Finding(
+            check_id=check_id,
+            category=category,
+            requirement=requirement,
+            status=status,
+            severity=severity,
+            details=detail,
+            remediation=remediation,
+            pages=pages,
+            source_requirement=_source_requirement_for(check_id),
+        ))
+
+    page_match = re.search(r"\b(\d+)\s+pages?\b", markdown, re.IGNORECASE)
+    page_count = int(page_match.group(1)) if page_match else 0
+    score = _calculate_score(findings)
+    summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "skipped", "not_applicable")}
+    return AuditReport(
+        file=file_name.strip(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        page_count=page_count,
+        score=score,
+        rating="Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected",
+        standard_basis=["External accessibility remediation report converted to the local audit contract."],
+        disclaimer=DISCLAIMER,
+        summary=summary,
+        findings=findings,
+    )
+
+
 def read_json(input_path: str | Path) -> AuditReport:
-    """Load and validate an audit report produced by :func:`write_json`."""
+    """Load a canonical audit report or convert a supported external Markdown report."""
     path = Path(input_path).expanduser().resolve()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and "findings" not in data:
+            return _read_external_markdown_report(data)
         findings = [Finding(**item) for item in data.pop("findings")]
         return AuditReport(findings=findings, **data)
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Invalid audit JSON report: {path}") from exc
 
 
@@ -466,8 +615,8 @@ p{{margin:.38rem 0}} a{{color:var(--blue)}} button{{margin-top:1rem;padding:.75r
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Screen a PDF for common accessibility barriers.")
     parser.add_argument("pdf", help="Path to the PDF to evaluate")
-    parser.add_argument("--output", "-o", default="accessibility-report.html", help="HTML report path")
-    parser.add_argument("--json", dest="json_output", help="JSON report path; defaults to accessibility-report-<file_name>.json")
+    parser.add_argument("--output", "-o", default=str(AUDIT_REPORTS_DIR / "accessibility-report.html"), help="HTML report path")
+    parser.add_argument("--json", dest="json_output", help="JSON report path; defaults under reports/audits")
     parser.add_argument("--no-open", action="store_true", help="Do not open the HTML report in a browser")
     return parser
 
@@ -478,7 +627,7 @@ def main() -> int:
         report = audit_pdf(args.pdf)
         html_path = write_html(report, args.output)
         source = Path(args.pdf).expanduser().resolve()
-        json_output = args.json_output or f"accessibility-report-{source.stem}.json"
+        json_output = args.json_output or AUDIT_REPORTS_DIR / f"accessibility-report-{source.stem}.json"
         json_path = write_json(report, json_output)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

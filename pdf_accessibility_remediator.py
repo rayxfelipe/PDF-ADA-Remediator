@@ -21,7 +21,7 @@ from pypdf.generic import (
     TextStringObject,
 )
 
-from pdf_accessibility_audit import AuditReport, DISCLAIMER, audit_pdf, read_json
+from pdf_accessibility_audit import AuditReport, DISCLAIMER, REMEDIATION_REPORTS_DIR, audit_pdf, read_json
 
 AUDIT_REPORT_PREFIX = "accessibility-report-"
 
@@ -386,8 +386,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Remediate a PDF using a JSON audit report.")
     parser.add_argument("audit_json", help="Audit JSON named accessibility-report-<file_name>.json")
     parser.add_argument("--pdf", help="Source PDF path; optional when its name is encoded in the report filename")
-    parser.add_argument("--output", "-o", help="Remediated PDF path; defaults beside the source PDF")
-    parser.add_argument("--report", help="Remediation HTML report path; defaults beside the audit JSON")
+    parser.add_argument("--output", "-o", help="Remediated PDF path; defaults under reports/remediated")
+    parser.add_argument("--report", help="Remediation HTML report path; defaults under reports/remediated")
     parser.add_argument("--language", default="en-US", help="Default language used when the audit reports none")
     parser.add_argument("--no-open", action="store_true", help="Do not open the remediation HTML report")
     return parser
@@ -398,12 +398,11 @@ def main() -> int:
     try:
         audit_report = read_json(args.audit_json)
         source = resolve_source_pdf(args.audit_json, audit_report, args.pdf)
-        output = Path(args.output).expanduser().resolve() if args.output else source.with_name(f"{source.stem}_remediated.pdf")
-        audit_json_path = Path(args.audit_json).expanduser().resolve()
+        output = Path(args.output).expanduser().resolve() if args.output else (REMEDIATION_REPORTS_DIR / f"{source.stem}_remediated.pdf").resolve()
         report_output = (
             Path(args.report).expanduser().resolve()
             if args.report
-            else audit_json_path.with_name(f"{audit_json_path.stem}-remediation.html")
+            else (REMEDIATION_REPORTS_DIR / f"{source.stem}-remediation.html").resolve()
         )
         result = remediate_from_json(args.audit_json, output, args.language, source)
         report_path = write_remediation_html(result, report_output)
