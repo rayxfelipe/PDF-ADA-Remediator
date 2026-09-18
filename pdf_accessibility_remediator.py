@@ -360,7 +360,12 @@ def remediate_from_json(
     )
 
 
-def write_remediation_html(report: RemediationReport, output_path: str | Path, download_url: str | None = None) -> Path:
+def write_remediation_html(
+    report: RemediationReport,
+    output_path: str | Path,
+    download_url: str | None = None,
+    home_url: str | None = None,
+) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
@@ -378,6 +383,9 @@ def write_remediation_html(report: RemediationReport, output_path: str | Path, d
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
     document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Remediation Results</title><style>
 :root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--pass:#176b45;--fail:#a12622;--manual:#5f3b91;--border:#d7dee8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}main{{width:min(1000px,calc(100% - 2rem));margin:2rem auto 4rem}}header,.panel,.finding{{background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 3px 14px #1720330d;padding:1.3rem}}header{{border-top:6px solid var(--blue)}}h1{{line-height:1.15}}.file{{overflow-wrap:anywhere;color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:1rem;margin:1rem 0}}.metric{{padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:10px}}.metric strong{{display:block;font-size:1.7rem}}.finding{{margin:.8rem 0;border-left:6px solid var(--border)}}.finding.success{{border-left-color:var(--pass)}}.finding.failed{{border-left-color:var(--fail)}}.finding.manual{{border-left-color:var(--manual)}}.finding-head{{display:flex;gap:.6rem;align-items:center}}.badge{{border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800;background:#e8edf4}}.success .badge{{background:#d9f3e7;color:#0f5a39}}.failed .badge{{background:#fde3e1;color:#841d19}}.manual .badge{{background:#eee4fa;color:#503078}}.check-id{{color:var(--muted);font-weight:700;font-size:.78rem}}.button{{display:inline-block;padding:.75rem 1.15rem;border-radius:8px;background:var(--blue);color:#fff;font-weight:750;text-decoration:none}}.button:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}}@media print{{body{{background:#fff}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}}}</style></head><body><main><header><p>Automatic remediation complete</p><h1>PDF Remediation Results</h1><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>New file:</strong> {e(report.remediated_file)}</p><div class="grid"><div class="metric"><strong>{report.before_score} → {report.after_score}</strong><span>Automated score</span></div><div class="metric"><strong>{report.successful}</strong><span>Remediated</span></div><div class="metric"><strong>{report.failed}</strong><span>Not remediated</span></div><div class="metric"><strong>{report.manual_review}</strong><span>Manual checks</span></div></div>{download}</header><section class="panel"><h2>Important limitation</h2><p>{e(DISCLAIMER)}</p><p>The original PDF was preserved. A successful item means its specific automated check passed afterward; it does not mean the entire PDF is compliant.</p></section><section><h2>Remediation outcomes</h2>{rows}</section></main></body></html>"""
+    if home_url:
+        home = f'<p><a class="button" href="{e(home_url, quote=True)}">Home</a></p>'
+        document = document.replace("<body><main>", f"<body><main>{home}", 1)
     path.write_text(document, encoding="utf-8")
     return path
 

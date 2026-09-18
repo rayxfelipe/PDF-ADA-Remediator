@@ -15,7 +15,7 @@ from pypdf.generic import (
 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
 from pdf_accessibility_remediator import _tag_untagged_document, remediate_from_json
-from pdf_accessibility_workflow import _parse_remediation_upload, _save_uploaded_report
+from pdf_accessibility_workflow import _parse_pdf_upload, _parse_remediation_upload
 
 
 def _image_only_writer() -> PdfWriter:
@@ -182,15 +182,28 @@ class ImageOnlyTaggingTests(unittest.TestCase):
             with source.open("wb") as stream:
                 _image_only_writer().write(stream)
             report = audit_pdf(source)
-            html_path = write_html(report, Path(folder) / "report.html", "/remediate", "token-value", "/upload-remediation")
+            html_path = write_html(report, Path(folder) / "report.html", "/remediate", "token-value", "/upload-remediation", "/new")
             document = html_path.read_text(encoding="utf-8")
 
         self.assertIn("Yes, apply remediation", document)
         self.assertIn("Upload remediation JSON file", document)
         self.assertIn('action="/upload-remediation"', document)
         self.assertIn('enctype="multipart/form-data"', document)
+        self.assertIn('href="/new">Home</a>', document)
 
-    def test_parses_and_safely_saves_remediation_upload(self) -> None:
+    def test_workflow_parses_pdf_upload_in_memory(self) -> None:
+        boundary = "pdf-boundary"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"pdf\"; filename=\"../sample.pdf\"\r\n"
+            "Content-Type: application/pdf\r\n\r\n"
+        ).encode("utf-8") + b"%PDF-1.7\ncontent\n" + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        filename, payload = _parse_pdf_upload(f"multipart/form-data; boundary={boundary}", body)
+
+        self.assertEqual(filename, "sample.pdf")
+        self.assertEqual(payload, b"%PDF-1.7\ncontent\n")
+
+    def test_parses_remediation_upload_in_memory(self) -> None:
         boundary = "test-boundary"
         body = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"token\"\r\n\r\ntoken-value\r\n"
@@ -205,11 +218,6 @@ class ImageOnlyTaggingTests(unittest.TestCase):
         self.assertEqual(token, "token-value")
         self.assertEqual(filename, "external.json")
         self.assertEqual(payload, b'{"findings": []}')
-        with TemporaryDirectory() as folder:
-            incoming = Path(folder)
-            with self.assertRaises(ValueError):
-                _save_uploaded_report(filename, payload, incoming)
-            self.assertEqual(list(incoming.iterdir()), [])
 
 
 if __name__ == "__main__":

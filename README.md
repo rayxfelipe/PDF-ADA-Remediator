@@ -45,33 +45,31 @@ No Azure subscription, LLM, API key, or Microsoft Agent Framework configuration 
 
 ## Run the complete workflow
 
-    python pdf_accessibility_workflow.py "path/to/document.pdf"
+    python pdf_accessibility_workflow.py
 
 The workflow uses three separate programs:
 
-1. `pdf_accessibility_audit.py` audits the source PDF and writes JSON plus HTML reports.
-2. `pdf_accessibility_remediator.py` accepts that JSON report and creates a remediated PDF copy.
-3. `pdf_accessibility_workflow.py` runs the audit, opens its report, and waits. It invokes the remediator only after the user applies the generated audit or uploads a valid third-party remediation JSON report.
+1. `pdf_accessibility_audit.py` audits a PDF and can write JSON plus HTML reports when run directly.
+2. `pdf_accessibility_remediator.py` accepts a JSON report and creates a remediated PDF copy when run directly.
+3. `pdf_accessibility_workflow.py` opens an upload page, audits the selected PDF, and waits. It invokes the remediator only after the user applies the generated audit or uploads a valid third-party remediation JSON report.
 
 The complete workflow:
 
-1. Preserves the original PDF.
-2. Writes and displays the audit report without creating a remediated PDF.
-3. Writes `reports/audits/accessibility-report-<file_name>.json` as the contract between the two stages.
+1. Starts without requiring a PDF command-line argument.
+2. Accepts a PDF through the local browser page and keeps its bytes in memory.
+3. Creates the audit JSON and HTML in temporary storage and displays the audit report.
 4. Waits for the user to apply the generated audit or upload a third-party remediation JSON report in the browser.
-5. Validates uploaded JSON and saves it under `reports/incoming`.
-6. Only after either remediation action, creates `reports/remediated/<original-name>_remediated.pdf`, re-audits it, and displays the remediation results.
+5. Validates uploaded JSON in temporary storage without retaining it.
+6. Only after either remediation action, saves `reports/remediated/<original-name>_remediated.pdf`, re-audits it temporarily, and displays the remediation results.
 
-Local report files are organized as follows:
+The complete workflow persists only its remediated PDF:
 
 ```text
 reports/
-├── incoming/       External audit/remediation JSON used as input
-├── audits/         Locally generated audit JSON and HTML
-└── remediated/     Remediated PDFs and remediation HTML reports
+└── remediated/     Remediated PDF output
 ```
 
-The entire `reports/` tree is excluded from Git because reports and PDFs can contain customer information.
+The entire `reports/` tree is excluded from Git because remediated PDFs can contain customer information. Uploaded source PDFs, generated audit data, uploaded remediation JSON, and HTML reports are discarded when the workflow server stops.
 
 ## Workflow Diagram
 
@@ -79,34 +77,33 @@ The JSON audit report is the handoff contract between auditing and remediation. 
 
 ```mermaid
 flowchart LR
-    A["Source PDF"] --> B["Rules-based audit"]
-    B --> C["reports/audits/accessibility-report-&lt;file_name&gt;.json"]
-    B --> D["reports/audits/accessibility-report.html"]
+    A["Browser PDF upload"] --> B["In-memory source PDF"]
+    B --> C["Temporary rules-based audit"]
 
-    X["Compatible external auditor"] --> Y["reports/incoming/external-report.json"]
+    X["Compatible external auditor"] --> Y["Browser JSON upload"]
 
     C --> E{"Customer requests remediation?"}
     Y --> G
     E -- "No" --> F["No PDF changes"]
     E -- "Yes" --> G["Standalone remediator"]
-    A --> G
+    B --> G
     G --> H["reports/remediated/&lt;file_name&gt;_remediated.pdf"]
-    H --> I["reports/remediated/&lt;file_name&gt;-remediation.html"]
+    H --> I["Temporary verification report"]
 
-    A -. "Original preserved" .-> H
+    B -. "Discarded when server stops" .-> H
 ```
 
 The two input paths shown above are supported as follows:
 
-- **Included audit path:** `pdf_accessibility_audit.py` inspects the source PDF and writes both the JSON contract and an HTML report.
-- **External audit path:** another application may provide either the canonical JSON contract or the supported Markdown-report JSON format. Store these inputs under `reports/incoming` and use `--pdf` when the source PDF cannot be resolved from a canonical report name or stored path.
+- **Included audit path:** the complete workflow inspects the uploaded source PDF and keeps its JSON contract and HTML report temporary.
+- **External audit path:** another application may provide either the canonical JSON contract or the supported Markdown-report JSON format through the browser upload.
 - **Approval boundary:** the complete interactive workflow offers **Yes, apply remediation** for the generated audit and **Upload remediation JSON file** for a third-party report. Either action is an explicit remediation request. Running the standalone remediator is also an explicit request.
-- **Output behavior:** local audit artifacts are written under `reports/audits`, while remediated PDFs and result reports are written under `reports/remediated`. The original remains unchanged.
-- **Verification:** the remediated copy is audited again, and the resulting HTML report identifies remediated, unresolved, and manual-review findings.
+- **Output behavior:** only the remediated PDF is written under `reports/remediated`. The uploaded original remains in memory and is never written to a persistent application path.
+- **Verification:** the remediated copy is audited again, and the temporary HTML result identifies remediated, unresolved, and manual-review findings.
 
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
 
-The browser upload accepts JSON files up to 5 MB. The report must satisfy either the canonical `findings` schema or the supported 32-rule Markdown-report schema. Invalid uploads are rejected and removed; duplicate filenames receive a unique suffix rather than replacing an existing incoming report. The uploaded report controls which findings are remediated, while the PDF selected when the workflow started remains the source document.
+The browser accepts PDF files up to 20 MB and remediation JSON files up to 5 MB. A remediation report must satisfy either the canonical `findings` schema or the supported 32-rule Markdown-report schema. Invalid uploads are rejected. The uploaded report controls which findings are remediated, while the PDF uploaded in the browser remains the source document.
 
 Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, structured tab order, and baseline paragraph, figure, and artifact tagging for untagged documents. After remediation, all 32 rules appear in the result report as already passed, remediated, unresolved, manual, skipped, or not applicable. The application does **not** invent OCR text or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance.
 
@@ -120,13 +117,14 @@ Run only remediation, using the audit JSON:
 
 The audit command writes its HTML and JSON outputs under `reports/audits`. The remediation command writes the new PDF and its HTML result under `reports/remediated`. Explicit output options still override these defaults.
 
-Default local outputs are:
+Default standalone-script outputs are:
 
 - `reports/audits/accessibility-report.html`
 - `reports/audits/accessibility-report-<file_name>.json`
 - `reports/remediated/<file_name>_remediated.pdf`
 - `reports/remediated/<file_name>-remediation.html` for the standalone remediator
-- `reports/remediated/accessibility-report-remediation.html` for the complete workflow
+
+The complete workflow saves only `reports/remediated/<file_name>_remediated.pdf`.
 
 Running the tools again for the same filename replaces the corresponding default output. Use the output options when each run must be retained separately.
 
@@ -156,9 +154,9 @@ Output paths remain optional overrides:
 
 The remediator reads the persisted JSON file before opening and modifying the associated PDF. It does not rerun the original audit in place of that input. After writing the remediated copy, it audits the new copy to report which findings changed.
 
-Choose all complete-workflow output paths:
+Choose a custom complete-workflow output path:
 
-    python pdf_accessibility_workflow.py "document.pdf" --audit-json "custom/audit.json" --audit-report "custom/audit.html" --remediated-output "custom/document_remediated.pdf" --remediation-report "custom/remediation.html" --no-open
+    python pdf_accessibility_workflow.py --remediated-output "custom/document_remediated.pdf"
 
 ## Exit codes
 

@@ -556,6 +556,7 @@ def write_html(
     remediation_url: str | None = None,
     csrf_token: str = "",
     upload_url: str | None = None,
+    home_url: str | None = None,
 ) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -595,6 +596,7 @@ def write_html(
     {upload_form}
 </section>"""
 
+    home_link = f'<p><a class="home" href="{e(home_url, quote=True)}">Home</a></p>' if home_url else ""
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -610,10 +612,11 @@ header{{padding:2rem;border-top:6px solid var(--blue)}} h1{{font-size:clamp(1.8r
 .panel{{padding:1.2rem 1.4rem;margin:1.2rem 0}} .notice{{border-left:5px solid var(--warn)}} .finding{{padding:1.1rem 1.3rem;margin:.8rem 0;border-left:6px solid var(--border)}}
 .finding.pass{{border-left-color:var(--pass)}} .finding.fail{{border-left-color:var(--fail)}} .finding.warning{{border-left-color:var(--warn)}} .finding.manual{{border-left-color:var(--manual)}}
 .finding-head{{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}} .badge,.severity{{display:inline-block;border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800}} .badge{{background:#e8edf4}} .pass .badge{{background:#d9f3e7;color:#0f5a39}} .fail .badge{{background:#fde3e1;color:#841d19}} .warning .badge{{background:#fff0cb;color:#724700}} .manual .badge{{background:#eee4fa;color:#503078}} .severity{{border:1px solid var(--border)}}
-p{{margin:.38rem 0}} a{{color:var(--blue)}} button{{margin-top:1rem;padding:.75rem 1.15rem;border:0;border-radius:8px;background:var(--blue);color:#fff;font:inherit;font-weight:750;cursor:pointer}} button:hover{{background:#0d417d}} button:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}} .action{{border-left:5px solid var(--blue)}} footer{{color:var(--muted);margin-top:2rem}} @media print{{body{{background:#fff}}main{{width:100%;margin:0}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}.action{{display:none}}}}
+p{{margin:.38rem 0}} a{{color:var(--blue)}} .home{{display:inline-block;padding:.65rem 1rem;border:1px solid var(--blue);border-radius:8px;font-weight:750;text-decoration:none}} button{{margin-top:1rem;padding:.75rem 1.15rem;border:0;border-radius:8px;background:var(--blue);color:#fff;font:inherit;font-weight:750;cursor:pointer}} button:hover{{background:#0d417d}} button:focus-visible,.home:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}} .action{{border-left:5px solid var(--blue)}} footer{{color:var(--muted);margin-top:2rem}} @media print{{body{{background:#fff}}main{{width:100%;margin:0}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}.action,.home{{display:none}}}}
 </style>
 </head>
 <body><main>
+{home_link}
 <header><div class="eyebrow">Automated accessibility screening</div><h1>PDF Accessibility Report</h1><p class="file">{e(report.file)}</p>
 <div class="score-grid">
 <div class="metric"><strong>{report.score}/100</strong><span>Automated score</span></div><div class="metric"><strong>{report.page_count}</strong><span>Pages</span></div>
