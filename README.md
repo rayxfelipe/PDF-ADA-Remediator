@@ -170,23 +170,37 @@ Choose a custom complete-workflow output path:
 
 The numerical score covers only automated checks. Manual-review items are excluded from the score and must not be treated as passed.
 
-## Azure Functions deployment
+## Deploy to Azure with GitHub Copilot
 
-The project also includes a Python v2 Azure Functions wrapper in `function_app.py`. It provides one function-key-protected route with actions for upload, audit, remediation, and download. Source PDFs and audit JSON reports are stored in a private `pdf-jobs` Blob container; the remediation action downloads both and passes the JSON to the remediator. A random per-job token is additionally required for remediation and download.
+The repository includes `Dockerfile.azure` and Bicep infrastructure under `infra/` for an Azure App Service Linux container deployment. A repository user can clone the project, open it in VS Code with GitHub Copilot, authenticate to Azure, and ask Copilot to deploy the application into the user's own subscription.
 
-Required Function App settings:
+Suggested prompt:
 
-- `PDF_STORAGE_ACCOUNT_URL`: Blob endpoint, such as `https://<account>.blob.core.windows.net`
-- `PDF_CONTAINER_NAME`: defaults to `pdf-jobs`
-- `PDF_MAX_UPLOAD_BYTES`: defaults to `20971520` (20 MB)
-- `AzureWebJobsStorage__accountName`: hosting storage account name
-- `AzureWebJobsStorage__credential`: `managedidentity`
+> Deploy this repository to my Azure subscription using the App Service Linux container architecture in `infra/`. Generate globally unique resource names for my deployment, use the B1 Linux plan with one instance, build `Dockerfile.azure` in a private Azure Container Registry, and use the App Service managed identity for image pulls. Keep HTTPS-only access, TLS 1.2 or later, the `/health` health check, FTP disabled, and SCM basic publishing credentials disabled. Validate both `/health` and the complete PDF upload, audit, remediation, and download workflow. Do not deploy this application with Azure Functions Flex Consumption.
 
-The Function App's system-assigned identity requires **Storage Blob Data Contributor** on `pdf-jobs` for application files and on the hosting storage account for Functions host metadata and secrets. Do not retain an `AzureWebJobsStorage` account-key connection string when storage account key access is disabled. Open the endpoint using a Function or host key:
+Before deployment, the user needs:
 
-    https://<function-app>.azurewebsites.net/api/pdf-accessibility?code=<key>
+- An Azure subscription and permission to create resource groups and resources.
+- Permission to create role assignments. **Owner** is sufficient; **Contributor** plus **Role Based Access Control Administrator** is another common combination.
+- Azure CLI authentication for the intended tenant and subscription.
+- Access to App Service and Azure Container Registry in the selected region, including sufficient quota.
+- VS Code and GitHub Copilot with agent capabilities if Copilot will perform the deployment.
 
-Temporary job files contain uploaded documents. The deployed storage policy in `.azure/storage-lifecycle-policy.json` deletes block blobs under `pdf-jobs/` one day after their last modification without affecting the Function deployment package container.
+Copilot should inspect and adapt the included infrastructure rather than reuse its example names. Azure Container Registry, App Service, and Key Vault names must be globally unique. The checked-in parameter file contains example deployment metadata and is not an authorization credential.
+
+The expected deployment creates:
+
+- One Basic Azure Container Registry containing the application image.
+- One Linux B1 App Service plan and one containerized web app.
+- One Log Analytics workspace and Application Insights resource.
+- One Key Vault.
+- Managed-identity role assignments for private container image pulls and Key Vault access.
+
+The deployed endpoint is intentionally anonymous for a controlled pilot. Uploaded source PDFs and generated reports are processed in memory or temporary storage. Remediated PDFs use the container's ephemeral filesystem and should be downloaded promptly. Keep the app at one instance until workflow sessions and generated output are moved to shared storage.
+
+The example architecture was estimated at approximately **$17.41 USD per month** in `westus2` when created, primarily for the Linux B1 App Service plan and Basic Container Registry. Pricing varies by agreement, region, currency, usage, and date; review the current Azure estimate before approving deployment.
+
+Cloning or pushing this repository does not create or update Azure resources automatically. There is no GitHub Actions deployment workflow. A GitHub push changes only the repository; publishing a new application version requires an explicit Azure container build and App Service update performed by the user, Copilot, or a future CI/CD workflow.
 
 ## Repository privacy
 

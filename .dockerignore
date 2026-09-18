@@ -1,0 +1,6 @@
+*
+!Dockerfile.azure
+!requirements.txt
+!pdf_accessibility_audit.py
+!pdf_accessibility_remediator.py
+!pdf_accessibility_workflow.py

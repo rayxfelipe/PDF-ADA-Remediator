@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 import sys
 import tempfile
 import webbrowser
+from http.cookies import SimpleCookie
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -132,18 +135,51 @@ def _parse_remediation_upload(content_type: str, body: bytes) -> tuple[str, str,
 
 def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open_browser: bool) -> None:
     """Accept a browser upload and retain only its remediated output."""
-    token = secrets.token_urlsafe(32)
-    state: dict[str, Any] = {
-        "source_name": None,
-        "source_bytes": None,
-        "audit_json": None,
-        "audit_html": None,
-        "remediation": None,
-        "remediation_html": None,
-        "remediated_path": None,
-    }
+    host = os.getenv("WORKFLOW_HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "0"))
+    secure_cookie = bool(os.getenv("WEBSITE_HOSTNAME"))
+    session_states: dict[str, dict[str, Any]] = {}
+    sessions_lock = RLock()
+
+    def new_state() -> dict[str, Any]:
+        return {
+            "token": secrets.token_urlsafe(32),
+            "source_name": None,
+            "source_bytes": None,
+            "audit_json": None,
+            "audit_html": None,
+            "remediation": None,
+            "remediation_html": None,
+            "remediated_path": None,
+        }
 
     class WorkflowHandler(BaseHTTPRequestHandler):
+        session_id = ""
+        session_cookie = ""
+
+        def _state(self) -> dict[str, Any]:
+            if self.session_id:
+                return session_states[self.session_id]
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            candidate = cookie.get("pdf_workflow")
+            requested_id = candidate.value if candidate else ""
+            with sessions_lock:
+                if requested_id in session_states:
+                    self.session_id = requested_id
+                else:
+                    self.session_id = secrets.token_hex(24)
+                    session_states[self.session_id] = new_state()
+                    attributes = [f"pdf_workflow={self.session_id}", "Path=/", "HttpOnly", "SameSite=Lax"]
+                    if secure_cookie:
+                        attributes.append("Secure")
+                    self.session_cookie = "; ".join(attributes)
+                return session_states[self.session_id]
+
+        def end_headers(self) -> None:
+            if self.session_cookie:
+                self.send_header("Set-Cookie", self.session_cookie)
+            super().end_headers()
+
         def _send_bytes(self, data: bytes, content_type: str) -> None:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
@@ -154,6 +190,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             self.wfile.write(data)
 
         def _audit_upload(self, content_type: str, body: bytes) -> None:
+            state = self._state()
             filename, pdf_bytes = _parse_pdf_upload(content_type, body)
             with tempfile.TemporaryDirectory() as directory:
                 work_dir = Path(directory)
@@ -161,7 +198,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 audit_json = work_dir / "audit.json"
                 audit_html = work_dir / "audit.html"
                 source.write_bytes(pdf_bytes)
-                report = prepare_audit(source, audit_json, audit_html, "/remediate", token, "/upload-remediation", "/new")
+                report = prepare_audit(source, audit_json, audit_html, "/remediate", state["token"], "/upload-remediation", "/new")
                 state.update(
                     source_name=filename,
                     source_bytes=pdf_bytes,
@@ -174,11 +211,14 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             print(f"Audit score for {filename}: {report.score}/100")
 
         def _apply_selected_report(self, report_bytes: bytes) -> None:
+            state = self._state()
             source_name = state["source_name"]
             source_bytes = state["source_bytes"]
             if not source_name or not source_bytes:
                 raise ValueError("Upload a PDF before requesting remediation.")
-            output = remediated_pdf_path or (REMEDIATION_REPORTS_DIR / f"{Path(source_name).stem}_remediated.pdf").resolve()
+            output = remediated_pdf_path or (
+                REMEDIATION_REPORTS_DIR / f"{Path(source_name).stem}-{self.session_id[:8]}_remediated.pdf"
+            ).resolve()
             with tempfile.TemporaryDirectory() as directory:
                 work_dir = Path(directory)
                 source = work_dir / source_name
@@ -203,6 +243,10 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
         def do_GET(self) -> None:
             route = urlparse(self.path).path
             try:
+                if route == "/health":
+                    self._send_bytes(b'{"status":"ok"}', "application/json; charset=utf-8")
+                    return
+                state = self._state()
                 if route in {"/", "/report.html"}:
                     self._send_bytes(state["audit_html"] or UPLOAD_PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 elif route == "/new":
@@ -252,6 +296,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
 
             body = self.rfile.read(content_length)
             try:
+                state = self._state()
                 if route == "/upload-pdf":
                     self._audit_upload(self.headers.get("Content-Type", ""), body)
                     self.send_response(303)
@@ -263,7 +308,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 selected_report = state["audit_json"]
                 if route == "/upload-remediation":
                     submitted, filename, payload = _parse_remediation_upload(self.headers.get("Content-Type", ""), body)
-                    if not secrets.compare_digest(submitted, token):
+                    if not secrets.compare_digest(submitted, state["token"]):
                         self.send_error(403, "Invalid remediation request")
                         return
                     selected_report = payload
@@ -273,7 +318,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             except ValueError as exc:
                 self.send_error(400, str(exc))
                 return
-            if not secrets.compare_digest(submitted, token):
+            if not secrets.compare_digest(submitted, state["token"]):
                 self.send_error(403, "Invalid remediation request")
                 return
             try:
@@ -288,8 +333,9 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
         def log_message(self, format: str, *args: Any) -> None:
             print(f"Workflow server: {format % args}")
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), WorkflowHandler)
-    url = f"http://127.0.0.1:{server.server_port}/"
+    server = ThreadingHTTPServer((host, port), WorkflowHandler)
+    browser_host = "127.0.0.1" if host == "0.0.0.0" else host
+    url = f"http://{browser_host}:{server.server_port}/"
     print(f"PDF upload: {url}")
     print("The uploaded PDF is not retained. Only a remediated PDF is saved.")
     print("Keep this terminal running while using the report. Press Ctrl+C to stop.")

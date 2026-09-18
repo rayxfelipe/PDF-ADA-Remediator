@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "pdf-ada-staging-33f3"
+    },
+    "location": {
+      "value": "westus2"
+    },
+    "sessionId": {
+      "value": "33f3db6d-ad20-4080-b6bf-312afd414b4f"
+    },
+    "deployedBy": {
+      "value": "Ray Felipe"
+    },
+    "createdAt": {
+      "value": "2026-09-18T14:22:13.1765522-07:00"
+    }
+  }
+}

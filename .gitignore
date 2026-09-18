@@ -16,6 +16,7 @@ accessibility-report*.json
 *_remediated.pdf
 .azure/deployment-plan.md
 .azure/validate-status.json
+.copilot-azure/
 .DS_Store
 Thumbs.db
 
