@@ -88,6 +88,7 @@ EXTERNAL_RULE_SPECS = (
     ("ACR-HEAD-001", "Headings", "Appropriate nesting", "high"),
 )
 AUDIT_REPORTS_DIR = Path("reports") / "audits"
+INCOMING_REPORTS_DIR = Path("reports") / "incoming"
 REMEDIATION_REPORTS_DIR = Path("reports") / "remediated"
 SOURCE_DOCUMENT = "ADA Title II Web Accessibility.docx"
 SOURCE_REQUIREMENTS = {
@@ -549,7 +550,13 @@ def read_json(input_path: str | Path) -> AuditReport:
         raise ValueError(f"Invalid audit JSON report: {path}") from exc
 
 
-def write_html(report: AuditReport, output_path: str | Path, remediation_url: str | None = None, csrf_token: str = "") -> Path:
+def write_html(
+    report: AuditReport,
+    output_path: str | Path,
+    remediation_url: str | None = None,
+    csrf_token: str = "",
+    upload_url: str | None = None,
+) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
@@ -568,6 +575,15 @@ def write_html(report: AuditReport, output_path: str | Path, remediation_url: st
 
         remediation_panel = ""
         if remediation_url:
+                upload_form = ""
+                if upload_url:
+                    upload_form = f"""
+    <form method="post" action="{html.escape(upload_url, quote=True)}" enctype="multipart/form-data" onsubmit="return confirm('Apply remediation using the selected JSON report?');">
+        <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
+        <label for="remediation-json"><strong>Third-party report</strong></label>
+        <input id="remediation-json" type="file" name="remediation_json" accept="application/json,.json" required>
+        <button type="submit">Upload remediation JSON file</button>
+    </form>"""
                 remediation_panel = f"""
 <section class="panel action" aria-labelledby="remediate-heading">
     <h2 id="remediate-heading">Apply automatic remediation?</h2>
@@ -576,6 +592,7 @@ def write_html(report: AuditReport, output_path: str | Path, remediation_url: st
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
         <button type="submit">Yes, apply remediation</button>
     </form>
+    {upload_form}
 </section>"""
 
     html_doc = f"""<!doctype html>

@@ -4,13 +4,21 @@ import argparse
 import secrets
 import sys
 import webbrowser
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from pdf_accessibility_audit import AUDIT_REPORTS_DIR, REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, write_html, write_json
+from pdf_accessibility_audit import AUDIT_REPORTS_DIR, INCOMING_REPORTS_DIR, REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, read_json, write_html, write_json
 from pdf_accessibility_remediator import RemediationReport, remediate_from_json, write_remediation_html
+
+MAX_REMEDIATION_JSON_BYTES = 5 * 1024 * 1024
+
+
+def _safe_upload_name(value: str) -> str:
+    return value.replace("\\", "/").rsplit("/", 1)[-1].lstrip(".")
 
 
 def prepare_audit(
@@ -19,11 +27,12 @@ def prepare_audit(
     audit_html_path: str | Path,
     remediation_url: str = "/remediate",
     csrf_token: str = "",
+    upload_url: str | None = None,
 ) -> AuditReport:
     """Create the audit reports without modifying the source PDF."""
     audit_report = audit_pdf(pdf_path)
     write_json(audit_report, audit_json_path)
-    write_html(audit_report, audit_html_path, remediation_url, csrf_token)
+    write_html(audit_report, audit_html_path, remediation_url, csrf_token, upload_url)
     return audit_report
 
 
@@ -33,11 +42,52 @@ def apply_remediation(
     remediation_html_path: str | Path,
     default_language: str = "en-US",
     download_url: str | None = None,
+    source_pdf: str | Path | None = None,
 ) -> RemediationReport:
     """Run remediation only after an explicit caller action."""
-    report = remediate_from_json(audit_json_path, remediated_pdf_path, default_language)
+    report = remediate_from_json(audit_json_path, remediated_pdf_path, default_language, source_pdf)
     write_remediation_html(report, remediation_html_path, download_url)
     return report
+
+
+def _parse_remediation_upload(content_type: str, body: bytes) -> tuple[str, str, bytes]:
+    if not content_type.lower().startswith("multipart/form-data;"):
+        raise ValueError("Upload must use multipart/form-data.")
+    message = BytesParser(policy=email_policy).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + body
+    )
+    token = ""
+    filename = ""
+    payload = b""
+    for part in message.iter_parts():
+        field_name = part.get_param("name", header="content-disposition")
+        if field_name == "token":
+            token = part.get_content().strip()
+        elif field_name == "remediation_json":
+            filename = _safe_upload_name(part.get_filename() or "")
+            payload = part.get_payload(decode=True) or b""
+    if not filename.lower().endswith(".json"):
+        raise ValueError("Select a JSON remediation report.")
+    if not payload:
+        raise ValueError("The uploaded JSON report is empty.")
+    return token, filename, payload
+
+
+def _save_uploaded_report(filename: str, payload: bytes, incoming_dir: Path = INCOMING_REPORTS_DIR) -> Path:
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_upload_name(filename)
+    if not safe_name.lower().endswith(".json"):
+        raise ValueError("Select a JSON remediation report.")
+    destination = incoming_dir / safe_name
+    if destination.exists():
+        destination = incoming_dir / f"{Path(safe_name).stem}-{secrets.token_hex(4)}.json"
+    destination.write_bytes(payload)
+    try:
+        read_json(destination)
+    except ValueError:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
 
 
 def serve_workflow(
@@ -52,7 +102,7 @@ def serve_workflow(
     """Serve the audit first and remediate only when its button is clicked."""
     token = secrets.token_urlsafe(32)
     state: dict[str, RemediationReport | None] = {"remediation": None}
-    audit_report = prepare_audit(source_pdf, audit_json_path, audit_html_path, "/remediate", token)
+    audit_report = prepare_audit(source_pdf, audit_json_path, audit_html_path, "/remediate", token, "/upload-remediation")
 
     class WorkflowHandler(BaseHTTPRequestHandler):
         def _send_file(self, file_path: Path, content_type: str, attachment: bool = False) -> None:
@@ -82,22 +132,45 @@ def serve_workflow(
                 self.send_error(500, str(exc))
 
         def do_POST(self) -> None:
-            if urlparse(self.path).path != "/remediate":
+            route = urlparse(self.path).path
+            if route not in {"/remediate", "/upload-remediation"}:
                 self.send_error(404)
                 return
-            length = min(int(self.headers.get("Content-Length", "0")), 4096)
-            form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"))
-            submitted = form.get("token", [""])[0]
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self.send_error(400, "Invalid content length")
+                return
+            if content_length <= 0 or content_length > MAX_REMEDIATION_JSON_BYTES:
+                self.send_error(413, "Remediation request is too large")
+                return
+
+            body = self.rfile.read(content_length)
+            selected_report = audit_json_path
+            try:
+                if route == "/upload-remediation":
+                    submitted, filename, payload = _parse_remediation_upload(self.headers.get("Content-Type", ""), body)
+                    if not secrets.compare_digest(submitted, token):
+                        self.send_error(403, "Invalid remediation request")
+                        return
+                    selected_report = _save_uploaded_report(filename, payload)
+                else:
+                    form = parse_qs(body.decode("utf-8", errors="replace"))
+                    submitted = form.get("token", [""])[0]
+            except ValueError as exc:
+                self.send_error(400, str(exc))
+                return
             if not secrets.compare_digest(submitted, token):
                 self.send_error(403, "Invalid remediation request")
                 return
             try:
                 state["remediation"] = apply_remediation(
-                    audit_json_path,
+                    selected_report,
                     remediated_pdf_path,
                     remediation_html_path,
                     default_language,
                     "/remediated.pdf",
+                    source_pdf,
                 )
             except Exception as exc:
                 self.send_error(500, f"Remediation failed: {exc}")

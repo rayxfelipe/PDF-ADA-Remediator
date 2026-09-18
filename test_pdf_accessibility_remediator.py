@@ -13,8 +13,9 @@ from pypdf.generic import (
     NumberObject,
 )
 
-from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_json
+from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
 from pdf_accessibility_remediator import _tag_untagged_document, remediate_from_json
+from pdf_accessibility_workflow import _parse_remediation_upload, _save_uploaded_report
 
 
 def _image_only_writer() -> PdfWriter:
@@ -174,6 +175,41 @@ class ImageOnlyTaggingTests(unittest.TestCase):
         language = next(item for item in converted.findings if item.check_id == "ACR-DOC-005")
         self.assertEqual(language.status, "fail")
         self.assertEqual(language.remediation, "Set /Lang to en-US.")
+
+    def test_report_includes_external_remediation_upload(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "source.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            report = audit_pdf(source)
+            html_path = write_html(report, Path(folder) / "report.html", "/remediate", "token-value", "/upload-remediation")
+            document = html_path.read_text(encoding="utf-8")
+
+        self.assertIn("Yes, apply remediation", document)
+        self.assertIn("Upload remediation JSON file", document)
+        self.assertIn('action="/upload-remediation"', document)
+        self.assertIn('enctype="multipart/form-data"', document)
+
+    def test_parses_and_safely_saves_remediation_upload(self) -> None:
+        boundary = "test-boundary"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"token\"\r\n\r\ntoken-value\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_json\"; filename=\"..\\external.json\"\r\n"
+            "Content-Type: application/json\r\n\r\n"
+            "{\"findings\": []}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+
+        token, filename, payload = _parse_remediation_upload(f"multipart/form-data; boundary={boundary}", body)
+
+        self.assertEqual(token, "token-value")
+        self.assertEqual(filename, "external.json")
+        self.assertEqual(payload, b'{"findings": []}')
+        with TemporaryDirectory() as folder:
+            incoming = Path(folder)
+            with self.assertRaises(ValueError):
+                _save_uploaded_report(filename, payload, incoming)
+            self.assertEqual(list(incoming.iterdir()), [])
 
 
 if __name__ == "__main__":
