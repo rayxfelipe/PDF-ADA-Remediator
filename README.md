@@ -47,6 +47,8 @@ No Azure subscription, LLM, API key, or Microsoft Agent Framework configuration 
 
     python pdf_accessibility_workflow.py
 
+The command starts a local HTTP server on `127.0.0.1`, selects an available port, and opens the PDF upload page in the default browser. The terminal must remain running while the page is in use. This local URL is accessible only from the computer running the command.
+
 The workflow uses three separate programs:
 
 1. `pdf_accessibility_audit.py` audits a PDF and can write JSON plus HTML reports when run directly.
@@ -56,11 +58,12 @@ The workflow uses three separate programs:
 The complete workflow:
 
 1. Starts without requiring a PDF command-line argument.
-2. Accepts a PDF through the local browser page and keeps its bytes in memory.
+2. Accepts a PDF through the local browser page and processes it using memory and automatically deleted temporary files.
 3. Creates the audit JSON and HTML in temporary storage and displays the audit report.
 4. Waits for the user to apply the generated audit or upload a third-party remediation JSON report in the browser.
 5. Validates uploaded JSON in temporary storage without retaining it.
 6. Only after either remediation action, saves `reports/remediated/<original-name>_remediated.pdf`, re-audits it temporarily, and displays the remediation results.
+7. Provides a **Home** button on the audit and remediation pages that clears the current upload and returns to the PDF upload screen.
 
 The complete workflow persists only its remediated PDF:
 
@@ -98,7 +101,8 @@ The two input paths shown above are supported as follows:
 - **Included audit path:** the complete workflow inspects the uploaded source PDF and keeps its JSON contract and HTML report temporary.
 - **External audit path:** another application may provide either the canonical JSON contract or the supported Markdown-report JSON format through the browser upload.
 - **Approval boundary:** the complete interactive workflow offers **Yes, apply remediation** for the generated audit and **Upload remediation JSON file** for a third-party report. Either action is an explicit remediation request. Running the standalone remediator is also an explicit request.
-- **Output behavior:** only the remediated PDF is written under `reports/remediated`. The uploaded original remains in memory and is never written to a persistent application path.
+- **Output behavior:** only the remediated PDF is written under `reports/remediated`. The uploaded original is never written to a persistent application path.
+- **Home navigation:** selecting **Home** clears the current in-memory workflow state and returns to the initial PDF upload screen.
 - **Verification:** the remediated copy is audited again, and the temporary HTML result identifies remediated, unresolved, and manual-review findings.
 
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
