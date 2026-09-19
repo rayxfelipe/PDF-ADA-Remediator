@@ -1,4 +1,5 @@
 from io import BytesIO
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,7 +16,14 @@ from pypdf.generic import (
 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
 from pdf_accessibility_remediator import _tag_untagged_document, remediate_from_json
-from pdf_accessibility_workflow import _parse_pdf_upload, _parse_remediation_upload
+from pdf_accessibility_workflow import (
+    _parse_api_remediation_upload,
+    _parse_pdf_upload,
+    _parse_remediation_upload,
+    _attachment_header,
+    _valid_api_key,
+    remediate_api_payload,
+)
 
 
 def _image_only_writer() -> PdfWriter:
@@ -218,6 +226,81 @@ class ImageOnlyTaggingTests(unittest.TestCase):
         self.assertEqual(token, "token-value")
         self.assertEqual(filename, "external.json")
         self.assertEqual(payload, b'{"findings": []}')
+
+    def test_api_remediates_matching_pdf_and_report_without_persisting(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "source.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            report = audit_pdf(source)
+            report_path = write_json(report, Path(folder) / "audit.json")
+
+            output_name, output = remediate_api_payload(
+                source.name,
+                source.read_bytes(),
+                report_path.read_bytes(),
+            )
+
+        self.assertEqual(output_name, "source_remediated.pdf")
+        self.assertTrue(output.startswith(b"%PDF-"))
+        self.assertTrue(PdfReader(BytesIO(output)).trailer["/Root"]["/MarkInfo"]["/Marked"])
+
+    def test_api_rejects_report_for_different_pdf(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "source.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            report = replace(audit_pdf(source), file="different.pdf")
+            report_path = write_json(report, Path(folder) / "audit.json")
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                remediate_api_payload(source.name, source.read_bytes(), report_path.read_bytes())
+
+    def test_parses_api_remediation_multipart(self) -> None:
+        boundary = "api-boundary"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.pdf\"\r\n"
+            "Content-Type: application/pdf\r\n\r\n"
+        ).encode() + b"%PDF-1.7\ncontent\n" + (
+            f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_report\"; filename=\"report.json\"\r\n"
+            "Content-Type: application/json\r\n\r\n"
+            '{"fileName":"source.pdf","remediationReport":"report"}'
+            f"\r\n--{boundary}--\r\n"
+        ).encode()
+
+        filename, pdf, report = _parse_api_remediation_upload(
+            f"multipart/form-data; boundary={boundary}", body
+        )
+
+        self.assertEqual(filename, "source.pdf")
+        self.assertEqual(pdf, b"%PDF-1.7\ncontent\n")
+        self.assertIn(b'"fileName":"source.pdf"', report)
+
+    def test_api_rejects_duplicate_multipart_fields(self) -> None:
+        boundary = "duplicate-boundary"
+        file_part = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.pdf\"\r\n"
+            "Content-Type: application/pdf\r\n\r\n%PDF-1.7\n"
+        )
+        report_part = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_report\"\r\n\r\n{{}}\r\n"
+        )
+        body = (file_part + "\r\n" + file_part + "\r\n" + report_part + f"--{boundary}--\r\n").encode()
+
+        with self.assertRaisesRegex(ValueError, "one PDF"):
+            _parse_api_remediation_upload(f"multipart/form-data; boundary={boundary}", body)
+
+    def test_api_key_is_optional_but_enforced_when_configured(self) -> None:
+        self.assertTrue(_valid_api_key("", ""))
+        self.assertTrue(_valid_api_key("poc-secret", "poc-secret"))
+        self.assertFalse(_valid_api_key("poc-secret", "wrong-secret"))
+
+    def test_attachment_header_encodes_untrusted_filename(self) -> None:
+        header = _attachment_header('report"\r\nInjected.pdf')
+
+        self.assertNotIn("\r", header)
+        self.assertNotIn("\n", header)
+        self.assertIn("%22%0D%0A", header)
 
 
 if __name__ == "__main__":

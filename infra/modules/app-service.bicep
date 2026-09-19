@@ -4,6 +4,8 @@ param appName string
 param tags object
 param containerImage string
 param applicationInsightsConnectionString string
+@secure()
+param remediatorApiKey string
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2024-11-01' = {
   name: planName
@@ -47,6 +49,10 @@ resource appService 'Microsoft.Web/sites@2024-11-01' = {
         {
           name: 'PORT'
           value: '8000'
+        }
+        {
+          name: 'REMEDIATOR_API_KEY'
+          value: remediatorApiKey
         }
         {
           name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
