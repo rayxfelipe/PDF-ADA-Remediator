@@ -429,6 +429,7 @@ def write_json(report: AuditReport, output_path: str | Path) -> Path:
 
 def _external_rule_key(value: str) -> str:
     value = re.sub(r"\s*[\[(].*$", "", value).strip().lower()
+    value = re.sub(r"^(?:d|p|f|a|t|l|h)\d+\s+", "", value)
     return re.sub(r"[^a-z0-9]+", " ", value).strip()
 
 
@@ -436,6 +437,14 @@ def _markdown_rows(markdown: str) -> list[list[str]]:
     rows = []
     for line in markdown.splitlines():
         stripped = line.strip()
+        if stripped.startswith("-") and stripped.count("|") == 2:
+            cells = [cell.strip() for cell in stripped[1:].split("|")]
+            rows.append(cells)
+            continue
+        if stripped.startswith("-") and stripped.count("—") == 2:
+            cells = [cell.strip() for cell in stripped[1:].split("—")]
+            rows.append(cells)
+            continue
         if not stripped.startswith("|") or not stripped.endswith("|"):
             continue
         cells = [cell.strip() for cell in stripped[1:-1].split("|")]
@@ -482,7 +491,8 @@ def _read_external_markdown_report(data: dict[str, Any]) -> AuditReport:
             key = _external_rule_key(cells[0])
             if key not in specs_by_key:
                 continue
-            status = status_map.get(cells[2].lower())
+            status_text = re.sub(r"\s*\[[^]]+\]\s*$", "", cells[2]).lower()
+            status = status_map.get(status_text)
             if status is None:
                 raise ValueError(f"Unsupported external status '{cells[2]}' for '{cells[0]}'.")
             if key in statuses:

@@ -184,6 +184,49 @@ class ImageOnlyTaggingTests(unittest.TestCase):
         self.assertEqual(language.status, "fail")
         self.assertEqual(language.remediation, "Set /Lang to en-US.")
 
+    def test_converts_id_prefixed_bullet_summary_rows(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "external.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            canonical = audit_pdf(source)
+            rows = []
+            for finding in canonical.findings:
+                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
+                rows.append(f"- D1 {finding.requirement} | Major | {status}")
+            report_path = root / "external-report.json"
+            report_path.write_text(json.dumps({
+                "fileName": source.name,
+                "remediationReport": "\n".join(rows),
+            }), encoding="utf-8")
+
+            converted = read_json(report_path)
+
+        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
+
+    def test_converts_em_dash_summary_rows_with_status_qualifiers(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "external.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            canonical = audit_pdf(source)
+            rows = []
+            for index, finding in enumerate(canonical.findings, start=1):
+                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
+                qualifier = " [inferred - Tier B]" if status == "Failed" else ""
+                rows.append(f"- D{index} {finding.requirement} — Major — {status}{qualifier}")
+            report_path = root / "external-report.json"
+            report_path.write_text(json.dumps({
+                "fileName": source.name,
+                "remediationReport": "\n".join(rows),
+            }), encoding="utf-8")
+
+            converted = read_json(report_path)
+
+        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
+
     def test_report_includes_external_remediation_upload(self) -> None:
         with TemporaryDirectory() as folder:
             source = Path(folder) / "source.pdf"
