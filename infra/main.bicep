@@ -23,6 +23,9 @@ param deployerObjectId string
 @minLength(1)
 param containerImageName string = 'pdf-ada-remediator:latest'
 
+@secure()
+param remediatorApiKey string
+
 var tags = {
   'app-onboard-skill': 'true'
   'app-onboard-session-id': sessionId
@@ -75,6 +78,7 @@ module keyVault './modules/key-vault.bicep' = {
     location: location
     name: 'kv-pdf-ada-staging-33f3'
     tags: tags
+    remediatorApiKey: remediatorApiKey
   }
 }
 
@@ -88,6 +92,7 @@ module appService './modules/app-service.bicep' = {
     tags: tags
     containerImage: '${containerRegistry.outputs.loginServer}/${containerImageName}'
     applicationInsightsConnectionString: applicationInsights.outputs.connectionString
+    remediatorApiKey: '@Microsoft.KeyVault(SecretUri=${keyVault.outputs.vaultUri}secrets/remediator-api-key/)'
   }
 }
 
@@ -98,11 +103,8 @@ module roleAssignments './modules/role-assignments.bicep' = {
     acrName: 'crpdfadastaging33f3'
     appPrincipalId: appService.outputs.principalId
     deployerObjectId: deployerObjectId
-    keyVaultName: 'kv-pdf-ada-staging-33f3'
+    keyVaultName: keyVault.outputs.name
   }
-  dependsOn: [
-    keyVault
-  ]
 }
 
 output appServiceName string = appService.outputs.appServiceName
