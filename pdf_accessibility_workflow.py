@@ -130,6 +130,8 @@ def _parse_remediation_upload(content_type: str, body: bytes) -> tuple[str, str,
         raise ValueError("Select a JSON remediation report.")
     if not payload:
         raise ValueError("The uploaded JSON report is empty.")
+    if len(payload) > MAX_REMEDIATION_JSON_BYTES:
+        raise ValueError(f"The remediation report exceeds the {MAX_REMEDIATION_JSON_BYTES}-byte limit.")
     return token, filename, payload
 
 
@@ -190,10 +192,14 @@ def remediate_api_payload(
         source.write_bytes(pdf_bytes)
         report_path.write_bytes(report_bytes)
         report = read_json(report_path)
-        if _safe_upload_name(report.file).casefold() != pdf_name.casefold():
-            raise ValueError("The remediation report does not match the uploaded PDF.")
+        _validate_report_filename(report, pdf_name)
         remediate_from_json(report_path, output, default_language, source)
         return output_name, output.read_bytes()
+
+
+def _validate_report_filename(report: AuditReport, pdf_name: str) -> None:
+    if _safe_upload_name(report.file).casefold() != _safe_upload_name(pdf_name).casefold():
+        raise ValueError("The remediation report does not match the uploaded PDF.")
 
 
 def _valid_api_key(configured_key: str, supplied_key: str) -> bool:
@@ -297,7 +303,8 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 remediation_html = work_dir / "remediation.html"
                 source.write_bytes(source_bytes)
                 audit_json.write_bytes(report_bytes)
-                read_json(audit_json)
+                selected_report = read_json(audit_json)
+                _validate_report_filename(selected_report, source_name)
                 report = apply_remediation(
                     audit_json,
                     output,
@@ -423,6 +430,9 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 return
             try:
                 self._apply_selected_report(selected_report)
+            except ValueError as exc:
+                self.send_error(400, str(exc))
+                return
             except Exception as exc:
                 self.send_error(500, f"Remediation failed: {exc}")
                 return

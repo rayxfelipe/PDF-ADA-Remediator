@@ -6,7 +6,7 @@ import json
 import re
 import sys
 import webbrowser
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +27,7 @@ class Finding:
     remediation: str
     pages: list[int] | None = None
     source_requirement: str = ""
+    source_severity: str = ""
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,8 @@ class AuditReport:
     disclaimer: str
     summary: dict[str, int]
     findings: list[Finding]
+    source_notes: list[str] = field(default_factory=list)
+    manual_tasks: list[str] = field(default_factory=list)
 
 
 WEIGHTS = {"critical": 10, "high": 7, "medium": 4, "low": 1}
@@ -217,21 +220,61 @@ def _has_javascript(root: DictionaryObject, reader: PdfReader) -> bool:
     return any(page.get("/AA") is not None for page in reader.pages)
 
 
-def _page_content_is_tagged(page: Any, reader: PdfReader) -> bool:
+def _page_content_is_tagged(page: Any, reader: PdfReader, mapped_mcids: set[int]) -> bool:
     try:
         operations = ContentStream(page.get_contents(), reader).operations
     except Exception:
         return False
-    marked_depth = 0
+    marked_contexts: list[bool] = []
     content_operators = {b"Tj", b"TJ", b"'", b'"', b"Do", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"sh", b"INLINE IMAGE"}
-    for _, operator in operations:
-        if operator in {b"BMC", b"BDC"}:
-            marked_depth += 1
+    for operands, operator in operations:
+        if operator == b"BMC":
+            marked_contexts.append(bool(operands and operands[0] == "/Artifact"))
+        elif operator == b"BDC":
+            if operands and operands[0] == "/Artifact":
+                marked_contexts.append(True)
+                continue
+            properties = _resolve(operands[1]) if len(operands) > 1 else None
+            mcid = properties.get("/MCID") if isinstance(properties, DictionaryObject) else None
+            marked_contexts.append(isinstance(mcid, int) and not isinstance(mcid, bool) and int(mcid) in mapped_mcids)
         elif operator == b"EMC":
-            marked_depth = max(0, marked_depth - 1)
-        elif operator in content_operators and marked_depth == 0:
+            if marked_contexts:
+                marked_contexts.pop()
+        elif operator in content_operators and (not marked_contexts or not marked_contexts[-1]):
             return False
     return True
+
+
+def _mapped_mcids_by_page(reader: PdfReader, nodes: list[tuple[DictionaryObject, str]]) -> dict[int, set[int]]:
+    page_ids = {
+        page.indirect_reference.idnum: page_number
+        for page_number, page in enumerate(reader.pages, start=1)
+        if page.indirect_reference is not None
+    }
+    mapped: dict[int, set[int]] = {page_number: set() for page_number in range(1, len(reader.pages) + 1)}
+
+    def collect(value: Any) -> set[int]:
+        if isinstance(value, IndirectObject):
+            resolved = value.get_object()
+            if isinstance(resolved, DictionaryObject) and resolved.get("/Type") == "/StructElem":
+                return set()
+            value = resolved
+        if isinstance(value, int) and not isinstance(value, bool):
+            return {int(value)}
+        if isinstance(value, DictionaryObject):
+            mcid = value.get("/MCID")
+            return {int(mcid)} if isinstance(mcid, int) and not isinstance(mcid, bool) else set()
+        if isinstance(value, (ArrayObject, list, tuple)):
+            return set().union(*(collect(item) for item in value)) if value else set()
+        return set()
+
+    for element, _ in nodes:
+        page_ref = element.get("/Pg")
+        if isinstance(page_ref, IndirectObject):
+            page_number = page_ids.get(page_ref.idnum)
+            if page_number is not None:
+                mapped[page_number].update(collect(element.get("/K")))
+    return mapped
 
 
 def _contains_object_reference(value: Any) -> bool:
@@ -321,8 +364,15 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         if isinstance(field, dict) and not (_text(field.get("/TU")) or _text(field.get("/T")))
     ]
     image_only = bool(page_count) and len(scanned_pages) == page_count
-    fully_tagged = marked and has_structure
-    tagged_pages = [number for number, page in enumerate(reader.pages, 1) if _page_content_is_tagged(page, reader)] if fully_tagged else []
+    structure_root = _resolve(struct_root)
+    has_parent_tree = isinstance(structure_root, DictionaryObject) and structure_root.get("/ParentTree") is not None
+    fully_tagged = marked and has_structure and has_parent_tree and bool(nodes)
+    mapped_mcids = _mapped_mcids_by_page(reader, nodes) if fully_tagged else {}
+    tagged_pages = [
+        number
+        for number, page in enumerate(reader.pages, 1)
+        if _page_content_is_tagged(page, reader, mapped_mcids.get(number, set()))
+    ] if fully_tagged else []
     tabs_pages = [number for number, page in enumerate(reader.pages, 1) if page.get("/Tabs") == "/S"]
     tagged_annotations = [item for item in annotations if item.get("/StructParent") is not None]
     permissions = reader.user_access_permissions
@@ -345,7 +395,7 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     add("ACR-PAGE-001", "Page Content", "Tagged content", "pass" if len(tagged_pages) == page_count and page_count else "fail", "critical", f"All {page_count} page(s) have marked content." if len(tagged_pages) == page_count and page_count else f"Marked-content coverage was verified on {len(tagged_pages)} of {page_count} page(s).", "Associate meaningful page content with structure elements and mark layout content as artifacts.")
     add("ACR-PAGE-002", "Page Content", "Tagged annotations", "pass" if len(tagged_annotations) == len(annotations) else "fail", "high", f"{len(tagged_annotations)} of {len(annotations)} annotation(s) are structure-associated." if annotations else "No annotations require tagging.", "Associate each meaningful annotation with the structure tree.")
     add("ACR-PAGE-003", "Page Content", "Tab order", "pass" if len(tabs_pages) == page_count and page_count else "fail", "high", f"All {page_count} page(s) use structure order." if len(tabs_pages) == page_count and page_count else f"Structure-based tab order is set on {len(tabs_pages)} of {page_count} page(s).", "Set page tab order to use the document structure.")
-    add("ACR-PAGE-004", "Page Content", "Character encoding", "fail" if extraction_errors else "pass", "high", "Text extraction completed without errors." if not extraction_errors else f"Text extraction failed on {len(extraction_errors)} page(s).", "Use embedded Unicode-compatible fonts and valid character mappings.", extraction_errors or None)
+    add("ACR-PAGE-004", "Page Content", "Character encoding", "fail" if extraction_errors else "manual", "high", "Text extraction failed on one or more pages." if extraction_errors else "Text extraction completed, but valid Unicode mappings and text accuracy require object-level or assistive-technology verification.", "Use embedded Unicode-compatible fonts and valid character mappings, then verify extracted text against the visible document.", extraction_errors or None)
     add("ACR-PAGE-005", "Page Content", "Tagged multimedia", "pass" if not media or all(item.get("/StructParent") is not None for item in media) else "fail", "medium", f"Found {len(media)} multimedia annotation(s)." if media else "No multimedia objects require tagging.", "Tag multimedia and provide accessible alternatives.")
     add("ACR-PAGE-006", "Page Content", "Screen flicker", "manual" if media or has_scripts else "pass", "high", "Dynamic content requires manual flicker testing." if media or has_scripts else "No dynamic multimedia or scripts were detected.", "Verify that dynamic content does not flash above accessibility thresholds.")
     add("ACR-PAGE-007", "Page Content", "Scripts", "manual" if has_scripts else "pass", "high", "Scripts are present and require keyboard and assistive-technology testing." if has_scripts else "No document-level or page-level scripts were detected.", "Remove inaccessible scripts or provide an accessible equivalent.")
@@ -463,6 +513,64 @@ def _source_requirement_for(check_id: str) -> str:
     return SOURCE_REQUIREMENTS["pdfua"]
 
 
+def _external_requirement_name(value: str) -> str:
+    return re.sub(r"^(?:d|p|f|a|t|l|h)\d+\s+", "", value.strip(), flags=re.IGNORECASE)
+
+
+def _external_check_id(requirement: str, existing: set[str]) -> str:
+    slug = re.sub(r"[^A-Z0-9]+", "-", _external_rule_key(requirement).upper()).strip("-")
+    base = f"EXT-{slug[:48].rstrip('-') or 'FINDING'}"
+    check_id = base
+    suffix = 2
+    while check_id in existing:
+        check_id = f"{base}-{suffix}"
+        suffix += 1
+    return check_id
+
+
+def _external_local_severity(value: str) -> str:
+    normalized = value.strip().lower()
+    return {
+        "blocker": "critical",
+        "critical": "high",
+        "major": "medium",
+        "minor": "low",
+    }.get(normalized, "medium")
+
+
+def _external_pages(value: str) -> list[int] | None:
+    pages: set[int] = set()
+    for start, end in re.findall(r"\b(\d+)(?:\s*-\s*(\d+))?\b", value):
+        first = int(start)
+        last = int(end) if end else first
+        if last < first:
+            first, last = last, first
+        pages.update(range(first, last + 1))
+    return sorted(pages) or None
+
+
+def _external_context(markdown: str) -> tuple[list[str], list[str]]:
+    notes = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if re.match(r"\*\*(?:Overall Status|File name|Standards Applied):\*\*", stripped, re.IGNORECASE):
+            notes.append(stripped.replace("**", ""))
+
+    tasks = []
+    in_queue = False
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if re.match(r"#{1,6}\s+Manual Verification Queue\b", stripped, re.IGNORECASE):
+            in_queue = True
+            continue
+        if in_queue and stripped.startswith("#"):
+            break
+        match = re.match(r"(?:\d+[.)]|[-*])\s+(.+)", stripped)
+        if in_queue and match:
+            tasks.append(match.group(1).replace("**", ""))
+    return notes, tasks
+
+
 def _read_external_markdown_report(data: dict[str, Any]) -> AuditReport:
     file_name = data.get("fileName")
     markdown = data.get("remediationReport")
@@ -484,39 +592,41 @@ def _read_external_markdown_report(data: dict[str, Any]) -> AuditReport:
         "skipped": "skipped",
         "warning": "warning",
     }
-    statuses: dict[str, str] = {}
-    failure_details: dict[str, tuple[str, list[int] | None, str]] = {}
+    status_rows: dict[str, tuple[str, str, str]] = {}
+    failure_details: dict[str, tuple[str, list[int] | None, str, str, str]] = {}
     for cells in _markdown_rows(markdown):
         if len(cells) == 3 and cells[0].lower() != "rule":
             key = _external_rule_key(cells[0])
-            if key not in specs_by_key:
-                continue
             status_text = re.sub(r"\s*\[[^]]+\]\s*$", "", cells[2]).lower()
             status = status_map.get(status_text)
             if status is None:
                 raise ValueError(f"Unsupported external status '{cells[2]}' for '{cells[0]}'.")
-            if key in statuses:
+            if key in status_rows:
                 raise ValueError(f"Duplicate external rule '{cells[0]}'.")
-            statuses[key] = status
+            status_rows[key] = (_external_requirement_name(cells[0]), cells[1], status)
         elif len(cells) == 7 and cells[0].lower() != "rule":
             key = _external_rule_key(cells[0])
-            if key not in specs_by_key:
-                continue
-            page_numbers = [int(value) for value in re.findall(r"\d+", cells[2])]
             details = f"External evidence: {cells[4]}. Scope: {cells[2]}; count: {cells[3]}."
-            failure_details[key] = (details, page_numbers or None, cells[6])
+            source_requirement = cells[5].replace("**", "").strip()
+            failure_details[key] = (details, _external_pages(cells[2]), cells[6], source_requirement, cells[1])
 
-    missing = [requirement for _, _, requirement, _ in EXTERNAL_RULE_SPECS if _external_rule_key(requirement) not in statuses]
+    missing = [requirement for _, _, requirement, _ in EXTERNAL_RULE_SPECS if _external_rule_key(requirement) not in status_rows]
     if missing:
         raise ValueError(f"External report is missing {len(missing)} expected rule(s): {', '.join(missing)}")
 
     findings = []
     for check_id, category, requirement, severity in EXTERNAL_RULE_SPECS:
         key = _external_rule_key(requirement)
-        status = statuses[key]
-        detail, pages, remediation = failure_details.get(
+        _, source_severity, status = status_rows[key]
+        detail, pages, remediation, source_requirement, detail_severity = failure_details.get(
             key,
-            (f"External report result: {status.replace('_', ' ')}.", None, "Review this rule using the external report guidance."),
+            (
+                f"External report result: {status.replace('_', ' ')}.",
+                None,
+                "Review this rule using the external report guidance.",
+                _source_requirement_for(check_id),
+                source_severity,
+            ),
         )
         findings.append(Finding(
             check_id=check_id,
@@ -527,23 +637,56 @@ def _read_external_markdown_report(data: dict[str, Any]) -> AuditReport:
             details=detail,
             remediation=remediation,
             pages=pages,
-            source_requirement=_source_requirement_for(check_id),
+            source_requirement=source_requirement,
+            source_severity=detail_severity or source_severity,
+        ))
+
+    existing_ids = {item.check_id for item in findings}
+    for key, (requirement, source_severity, status) in status_rows.items():
+        if key in specs_by_key:
+            continue
+        check_id = _external_check_id(requirement, existing_ids)
+        existing_ids.add(check_id)
+        detail, pages, remediation, source_requirement, detail_severity = failure_details.get(
+            key,
+            (
+                f"External report result: {status.replace('_', ' ')}.",
+                None,
+                "Review this additional rule using the external report guidance.",
+                "Additional requirement supplied by the external accessibility report.",
+                source_severity,
+            ),
+        )
+        findings.append(Finding(
+            check_id=check_id,
+            category="External report",
+            requirement=requirement,
+            status=status,
+            severity=_external_local_severity(detail_severity or source_severity),
+            details=detail,
+            remediation=remediation,
+            pages=pages,
+            source_requirement=source_requirement,
+            source_severity=detail_severity or source_severity,
         ))
 
     page_match = re.search(r"\b(\d+)\s+pages?\b", markdown, re.IGNORECASE)
     page_count = int(page_match.group(1)) if page_match else 0
     score = _calculate_score(findings)
     summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "skipped", "not_applicable")}
+    source_notes, manual_tasks = _external_context(markdown)
     return AuditReport(
         file=file_name.strip(),
         generated_at=datetime.now(timezone.utc).isoformat(),
         page_count=page_count,
         score=score,
         rating="Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected",
-        standard_basis=["External accessibility remediation report converted to the local audit contract."],
+        standard_basis=["External accessibility remediation report converted to the local audit contract without treating it as proof of conformance."],
         disclaimer=DISCLAIMER,
         summary=summary,
         findings=findings,
+        source_notes=source_notes,
+        manual_tasks=manual_tasks,
     )
 
 
@@ -575,12 +718,13 @@ def write_html(
     rows = []
     for item in report.findings:
         pages = f" Pages: {', '.join(map(str, item.pages))}." if item.pages else ""
+        source_severity = f" Source label: {item.source_severity}." if item.source_severity else ""
         rows.append(f"""
         <article class="finding {e(item.status)}" aria-labelledby="{e(item.check_id)}-title">
           <div class="finding-head"><span class="badge">{e(labels[item.status])}</span><span class="severity">{e(item.severity.title())}</span><span class="check-id">{e(item.check_id)}</span></div>
           <h3 id="{e(item.check_id)}-title">{e(item.requirement)}</h3>
           <p><strong>Source requirement:</strong> {e(item.source_requirement)}</p>
-          <p><strong>Result:</strong> {e(item.details + pages)}</p>
+          <p><strong>Result:</strong> {e(item.details + pages + source_severity)}</p>
           <p><strong>Recommended action:</strong> {e(item.remediation)}</p>
         </article>""")
 
@@ -598,7 +742,7 @@ def write_html(
                 remediation_panel = f"""
 <section class="panel action" aria-labelledby="remediate-heading">
     <h2 id="remediate-heading">Apply automatic remediation?</h2>
-    <p>A new PDF will be created; the source file will not be changed. Safe metadata and viewer fixes will be applied. An untagged document can also receive a baseline structure: text objects become paragraphs, images become figures, and layout graphics become artifacts. OCR, alternate-text meaning, detailed semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
+    <p>A new PDF will be created; the source file will not be changed. Safe language and title-display fixes will be applied when supported by the source document. OCR, alternate-text meaning, semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
     <form method="post" action="{html.escape(remediation_url, quote=True)}" onsubmit="return confirm('Create a remediated copy now? The original will not be overwritten.');">
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
         <button type="submit">Yes, apply remediation</button>
@@ -607,6 +751,13 @@ def write_html(
 </section>"""
 
     home_link = f'<p><a class="home" href="{e(home_url, quote=True)}">Home</a></p>' if home_url else ""
+    source_context = ""
+    if report.source_notes or report.manual_tasks:
+        notes = "".join(f"<li>{e(item)}</li>" for item in report.source_notes)
+        tasks = "".join(f"<li>{e(item)}</li>" for item in report.manual_tasks)
+        source_context = f"""<section class="panel" aria-labelledby="source-context"><h2 id="source-context">Imported report context</h2>
+        {f'<h3>Evidence and standards notes</h3><ul>{notes}</ul>' if notes else ''}
+        {f'<h3>Manual verification queue</h3><ol>{tasks}</ol>' if tasks else ''}</section>"""
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -634,6 +785,7 @@ p{{margin:.38rem 0}} a{{color:var(--blue)}} .home{{display:inline-block;padding:
 </div><p><strong>{e(report.rating)}</strong></p></header>
 <section class="panel notice" aria-labelledby="limitations"><h2 id="limitations">Scope and limitations</h2><p>{e(report.disclaimer)}</p></section>
 <section class="panel" aria-labelledby="basis"><h2 id="basis">Evaluation basis</h2><ul>{''.join(f'<li>{e(item)}</li>' for item in report.standard_basis)}</ul><p>Generated {e(report.generated_at)}</p></section>
+{source_context}
 {remediation_panel}
 <section aria-labelledby="findings"><h2 id="findings">Detailed findings</h2>{''.join(rows)}</section>
 <footer><p>Prioritize failed critical and high-severity findings, then complete every manual review with assistive technology.</p></footer>

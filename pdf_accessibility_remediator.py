@@ -4,20 +4,17 @@ import argparse
 import html
 import sys
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
-    ArrayObject,
     BooleanObject,
-    ContentStream,
     DictionaryObject,
     IndirectObject,
     NameObject,
-    NumberObject,
     TextStringObject,
 )
 
@@ -40,6 +37,7 @@ class RemediationReport:
     source_file: str
     remediated_file: str
     generated_at: str
+    source_score: int
     before_score: int
     after_score: int
     successful: int
@@ -47,154 +45,36 @@ class RemediationReport:
     manual_review: int
     items: list[RemediationItem]
     after_audit: AuditReport
+    source_notes: list[str] = field(default_factory=list)
+    manual_tasks: list[str] = field(default_factory=list)
+
+
+LEGACY_CHECK_ID_MAP = {
+    "DOC-001": "ACR-DOC-003",
+    "DOC-002": "ACR-DOC-003",
+    "DOC-003": "ACR-DOC-005",
+    "DOC-004": "ACR-DOC-006",
+    "DOC-005": "ACR-DOC-006",
+    "NAV-001": "ACR-DOC-007",
+    "CONT-001": "ACR-PAGE-004",
+    "CONT-002": "ACR-DOC-002",
+    "IMG-001": "ACR-ALT-001",
+    "FORM-001": "ACR-FORM-002",
+    "MAN-001": "ACR-DOC-004",
+    "MAN-002": "ACR-HEAD-001",
+    "MAN-003": "ACR-TABLE-003",
+    "MAN-004": "ACR-DOC-008",
+    "MAN-005": "ACR-PAGE-009",
+    "MAN-006": "ACR-ALT-001",
+    "MAN-007": "ACR-FORM-001",
+    "MAN-008": "ACR-FORM-002",
+}
 
 
 def _resolve(value: Any) -> Any:
     while isinstance(value, IndirectObject):
         value = value.get_object()
     return value
-
-
-def _page_has_image(page: Any) -> bool:
-    resources = _resolve(page.get("/Resources"))
-    if not isinstance(resources, DictionaryObject):
-        return False
-    xobjects = _resolve(resources.get("/XObject"))
-    if not isinstance(xobjects, DictionaryObject):
-        return False
-    return any(
-        isinstance(_resolve(value), DictionaryObject) and _resolve(value).get("/Subtype") == "/Image"
-        for value in xobjects.values()
-    )
-
-
-def _xobject_subtype(page: Any, name: Any) -> Any:
-    resources = _resolve(page.get("/Resources"))
-    if not isinstance(resources, DictionaryObject):
-        return None
-    xobjects = _resolve(resources.get("/XObject"))
-    if not isinstance(xobjects, DictionaryObject):
-        return None
-    xobject = _resolve(xobjects.get(name))
-    return xobject.get("/Subtype") if isinstance(xobject, DictionaryObject) else None
-
-
-def _tag_untagged_document(writer: PdfWriter) -> bool:
-    """Add a baseline structure tree to an untagged image or mixed-content PDF."""
-    pages = list(writer.pages)
-    page_text = [(page.extract_text() or "").strip() for page in pages]
-    if not pages or not any(text or _page_has_image(page) for page, text in zip(pages, page_text)):
-        return False
-    image_only = all(not text and _page_has_image(page) for page, text in zip(pages, page_text))
-
-    structure_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
-    structure_root_ref = writer._add_object(structure_root)
-    document_element = DictionaryObject({
-        NameObject("/Type"): NameObject("/StructElem"),
-        NameObject("/S"): NameObject("/Document"),
-        NameObject("/P"): structure_root_ref,
-        NameObject("/K"): ArrayObject(),
-    })
-    document_ref = writer._add_object(document_element)
-    parent_tree_numbers = ArrayObject()
-
-    for page_index, page in enumerate(pages):
-        page_ref = page.indirect_reference
-        if page_ref is None:
-            raise ValueError("Unable to reference a page while creating the PDF structure tree.")
-
-        content = ContentStream(page.get_contents(), writer)
-        page_elements = ArrayObject()
-
-        def add_element(role: str) -> int:
-            mcid = len(page_elements)
-            element = DictionaryObject({
-                NameObject("/Type"): NameObject("/StructElem"),
-                NameObject("/S"): NameObject(role),
-                NameObject("/P"): document_ref,
-                NameObject("/Pg"): page_ref,
-                NameObject("/K"): NumberObject(mcid),
-            })
-            element_ref = writer._add_object(element)
-            document_element[NameObject("/K")].append(element_ref)
-            page_elements.append(element_ref)
-            return mcid
-
-        if image_only:
-            mcid = add_element("/Figure")
-            content.operations.insert(0, (
-                [NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})],
-                b"BDC",
-            ))
-            content.operations.append(([], b"EMC"))
-        else:
-            tagged_operations: list[tuple[Any, bytes]] = []
-            artifact_open = False
-            text_open = False
-
-            def open_artifact() -> None:
-                nonlocal artifact_open
-                if not artifact_open:
-                    tagged_operations.append(([NameObject("/Artifact")], b"BMC"))
-                    artifact_open = True
-
-            def close_artifact() -> None:
-                nonlocal artifact_open
-                if artifact_open:
-                    tagged_operations.append(([], b"EMC"))
-                    artifact_open = False
-
-            for operands, operator in content.operations:
-                if operator == b"BT":
-                    close_artifact()
-                    mcid = add_element("/P")
-                    tagged_operations.append((
-                        [NameObject("/P"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})],
-                        b"BDC",
-                    ))
-                    tagged_operations.append((operands, operator))
-                    text_open = True
-                elif operator == b"ET" and text_open:
-                    tagged_operations.append((operands, operator))
-                    tagged_operations.append(([], b"EMC"))
-                    text_open = False
-                elif operator == b"Do" and not text_open and operands and _xobject_subtype(page, operands[0]) == "/Image":
-                    close_artifact()
-                    mcid = add_element("/Figure")
-                    tagged_operations.extend((
-                        ([NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"),
-                        (operands, operator),
-                        ([], b"EMC"),
-                    ))
-                else:
-                    if not text_open:
-                        open_artifact()
-                    tagged_operations.append((operands, operator))
-
-            if text_open:
-                tagged_operations.append(([], b"EMC"))
-            close_artifact()
-            content.operations = tagged_operations
-
-        page.replace_contents(content)
-        page[NameObject("/StructParents")] = NumberObject(page_index)
-        page[NameObject("/Tabs")] = NameObject("/S")
-
-        parent_tree_numbers.extend((NumberObject(page_index), page_elements))
-
-    parent_tree = DictionaryObject({NameObject("/Nums"): parent_tree_numbers})
-    structure_root[NameObject("/K")] = document_ref
-    structure_root[NameObject("/ParentTree")] = writer._add_object(parent_tree)
-    structure_root[NameObject("/ParentTreeNextKey")] = NumberObject(len(pages))
-
-    mark_info = _resolve(writer._root_object.get("/MarkInfo"))
-    if not isinstance(mark_info, DictionaryObject):
-        mark_info = DictionaryObject()
-        writer._root_object[NameObject("/MarkInfo")] = mark_info
-    mark_info[NameObject("/Marked")] = BooleanObject(True)
-    mark_info[NameObject("/Suspects")] = BooleanObject(False)
-    writer._root_object[NameObject("/StructTreeRoot")] = structure_root_ref
-    return True
 
 
 def pdf_name_from_report(audit_json: str | Path) -> str | None:
@@ -275,23 +155,21 @@ def remediate_from_json(
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
     root = writer._root_object
+    local_before = audit_pdf(source)
+    local_before_by_id = {item.check_id: item for item in local_before.findings}
 
     if language_check.status != "pass":
         root[NameObject("/Lang")] = TextStringObject(default_language)
-    if title_check.status != "pass":
-        title = source.stem.replace("_", " ").replace("-", " ").strip() or "Accessible document"
-        writer.add_metadata({"/Title": title})
-
-    if root.get("/StructTreeRoot") is None:
-        _tag_untagged_document(writer)
 
     viewer_prefs = _resolve(root.get("/ViewerPreferences"))
     if not isinstance(viewer_prefs, DictionaryObject):
         viewer_prefs = DictionaryObject()
         root[NameObject("/ViewerPreferences")] = viewer_prefs
-    viewer_prefs[NameObject("/DisplayDocTitle")] = BooleanObject(True)
+    existing_title = str(getattr(reader.metadata, "title", "") or "").strip()
+    if existing_title:
+        viewer_prefs[NameObject("/DisplayDocTitle")] = BooleanObject(True)
 
-    if root.get("/StructTreeRoot") is not None:
+    if local_before_by_id["ACR-DOC-003"].status == "pass":
         for page in writer.pages:
             page[NameObject("/Tabs")] = NameObject("/S")
 
@@ -301,15 +179,29 @@ def remediate_from_json(
 
     after = audit_pdf(destination)
     after_by_id = {item.check_id: item for item in after.findings}
+
+    def local_finding(original: Any, findings: dict[str, Any]) -> Any:
+        return findings.get(LEGACY_CHECK_ID_MAP.get(original.check_id, original.check_id))
+
     items: list[RemediationItem] = []
     for original in before.findings:
-        updated = after_by_id.get(original.check_id)
-        if original.status == "pass":
+        previous = local_finding(original, local_before_by_id)
+        updated = local_finding(original, after_by_id)
+        guidance = f" Source evidence: {original.details} Recommended follow-up: {original.remediation}"
+        if updated is None:
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "manual",
+                "This imported rule is not assessed by the local post-remediation verifier; its source result remains unresolved." + guidance,
+                original.source_requirement,
+            ))
+        elif original.status == "pass" and updated.status == "pass":
             items.append(RemediationItem(
                 original.check_id,
                 original.requirement,
                 "passed",
-                "The rule passed before remediation and remains unchanged.",
+                "The imported pass agrees with the local post-remediation check." + guidance,
                 original.source_requirement,
             ))
         elif original.status in {"not_applicable", "skipped"}:
@@ -320,29 +212,44 @@ def remediate_from_json(
                 original.details,
                 original.source_requirement,
             ))
-        elif original.status == "manual" or (updated is not None and updated.status == "manual"):
+        elif original.status == "manual" or updated.status == "manual":
             items.append(RemediationItem(
                 original.check_id,
                 original.requirement,
                 "manual",
-                "This requirement needs human judgment and assistive-technology testing.",
+                "This requirement needs human judgment, object-level inspection, or assistive-technology testing." + guidance,
                 original.source_requirement,
             ))
-        elif updated is not None and updated.status == "pass":
-            items.append(RemediationItem(
-                original.check_id,
-                original.requirement,
-                "success",
-                f"Updated successfully. New result: {updated.details}",
-                original.source_requirement,
-            ))
-        else:
-            details = "The check was not present in the post-remediation audit." if updated is None else f"{updated.details} {updated.remediation}"
+        elif original.status == "pass":
             items.append(RemediationItem(
                 original.check_id,
                 original.requirement,
                 "failed",
-                f"Not safely remediated automatically. {details}",
+                f"The imported pass conflicts with the local post-remediation result ({updated.status}); it is not treated as verified." + guidance,
+                original.source_requirement,
+            ))
+        elif updated.status == "pass" and previous is not None and previous.status != "pass":
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "success",
+                f"The same local check changed from {previous.status} to pass. New result: {updated.details}" + guidance,
+                original.source_requirement,
+            ))
+        elif updated.status == "pass":
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "manual",
+                "The external report and the local pre-remediation check disagree, so no repair is claimed." + guidance,
+                original.source_requirement,
+            ))
+        else:
+            items.append(RemediationItem(
+                original.check_id,
+                original.requirement,
+                "failed",
+                f"Not safely remediated automatically. {updated.details} {updated.remediation}" + guidance,
                 original.source_requirement,
             ))
 
@@ -350,13 +257,16 @@ def remediate_from_json(
         source_file=str(source),
         remediated_file=str(destination),
         generated_at=datetime.now(timezone.utc).isoformat(),
-        before_score=before.score,
+        source_score=before.score,
+        before_score=local_before.score,
         after_score=after.score,
         successful=sum(item.status == "success" for item in items),
         failed=sum(item.status == "failed" for item in items),
         manual_review=sum(item.status == "manual" for item in items),
         items=items,
         after_audit=after,
+        source_notes=before.source_notes,
+        manual_tasks=before.manual_tasks,
     )
 
 
@@ -381,8 +291,15 @@ def write_remediation_html(
         for item in report.items
     )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
+    source_context = ""
+    if report.source_notes or report.manual_tasks:
+        notes = "".join(f"<li>{e(item)}</li>" for item in report.source_notes)
+        tasks = "".join(f"<li>{e(item)}</li>" for item in report.manual_tasks)
+        source_context = f"""<section class="panel"><h2>Imported report context</h2>
+        {f'<h3>Evidence and standards notes</h3><ul>{notes}</ul>' if notes else ''}
+        {f'<h3>Manual verification queue</h3><ol>{tasks}</ol>' if tasks else ''}</section>"""
     document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Remediation Results</title><style>
-:root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--pass:#176b45;--fail:#a12622;--manual:#5f3b91;--border:#d7dee8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}main{{width:min(1000px,calc(100% - 2rem));margin:2rem auto 4rem}}header,.panel,.finding{{background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 3px 14px #1720330d;padding:1.3rem}}header{{border-top:6px solid var(--blue)}}h1{{line-height:1.15}}.file{{overflow-wrap:anywhere;color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:1rem;margin:1rem 0}}.metric{{padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:10px}}.metric strong{{display:block;font-size:1.7rem}}.finding{{margin:.8rem 0;border-left:6px solid var(--border)}}.finding.success{{border-left-color:var(--pass)}}.finding.failed{{border-left-color:var(--fail)}}.finding.manual{{border-left-color:var(--manual)}}.finding-head{{display:flex;gap:.6rem;align-items:center}}.badge{{border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800;background:#e8edf4}}.success .badge{{background:#d9f3e7;color:#0f5a39}}.failed .badge{{background:#fde3e1;color:#841d19}}.manual .badge{{background:#eee4fa;color:#503078}}.check-id{{color:var(--muted);font-weight:700;font-size:.78rem}}.button{{display:inline-block;padding:.75rem 1.15rem;border-radius:8px;background:var(--blue);color:#fff;font-weight:750;text-decoration:none}}.button:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}}@media print{{body{{background:#fff}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}}}</style></head><body><main><header><p>Automatic remediation complete</p><h1>PDF Remediation Results</h1><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>New file:</strong> {e(report.remediated_file)}</p><div class="grid"><div class="metric"><strong>{report.before_score} → {report.after_score}</strong><span>Automated score</span></div><div class="metric"><strong>{report.successful}</strong><span>Remediated</span></div><div class="metric"><strong>{report.failed}</strong><span>Not remediated</span></div><div class="metric"><strong>{report.manual_review}</strong><span>Manual checks</span></div></div>{download}</header><section class="panel"><h2>Important limitation</h2><p>{e(DISCLAIMER)}</p><p>The original PDF was preserved. A successful item means its specific automated check passed afterward; it does not mean the entire PDF is compliant.</p></section><section><h2>Remediation outcomes</h2>{rows}</section></main></body></html>"""
+:root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--pass:#176b45;--fail:#a12622;--manual:#5f3b91;--border:#d7dee8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}main{{width:min(1000px,calc(100% - 2rem));margin:2rem auto 4rem}}header,.panel,.finding{{background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 3px 14px #1720330d;padding:1.3rem}}header{{border-top:6px solid var(--blue)}}h1{{line-height:1.15}}.file{{overflow-wrap:anywhere;color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:1rem;margin:1rem 0}}.metric{{padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:10px}}.metric strong{{display:block;font-size:1.7rem}}.finding{{margin:.8rem 0;border-left:6px solid var(--border)}}.finding.success{{border-left-color:var(--pass)}}.finding.failed{{border-left-color:var(--fail)}}.finding.manual{{border-left-color:var(--manual)}}.finding-head{{display:flex;gap:.6rem;align-items:center}}.badge{{border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800;background:#e8edf4}}.success .badge{{background:#d9f3e7;color:#0f5a39}}.failed .badge{{background:#fde3e1;color:#841d19}}.manual .badge{{background:#eee4fa;color:#503078}}.check-id{{color:var(--muted);font-weight:700;font-size:.78rem}}.button{{display:inline-block;padding:.75rem 1.15rem;border-radius:8px;background:var(--blue);color:#fff;font-weight:750;text-decoration:none}}.button:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}}@media print{{body{{background:#fff}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}}}</style></head><body><main><header><p>Automatic remediation complete</p><h1>PDF Remediation Results</h1><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>New file:</strong> {e(report.remediated_file)}</p><div class="grid"><div class="metric"><strong>{report.before_score} → {report.after_score}</strong><span>Local automated score (same basis)</span></div><div class="metric"><strong>{report.source_score}</strong><span>Input report score</span></div><div class="metric"><strong>{report.successful}</strong><span>Remediated</span></div><div class="metric"><strong>{report.failed}</strong><span>Not remediated</span></div><div class="metric"><strong>{report.manual_review}</strong><span>Manual checks</span></div></div>{download}</header><section class="panel"><h2>Important limitation</h2><p>{e(DISCLAIMER)}</p><p>The original PDF was preserved. A successful item means the same local automated check changed from a non-passing result before remediation to a pass afterward; it does not mean the entire PDF is compliant.</p></section>{source_context}<section><h2>Remediation outcomes</h2>{rows}</section></main></body></html>"""
     if home_url:
         home = f'<p><a class="button" href="{e(home_url, quote=True)}">Home</a></p>'
         document = document.replace("<body><main>", f"<body><main>{home}", 1)

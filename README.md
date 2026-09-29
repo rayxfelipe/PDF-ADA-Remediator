@@ -4,6 +4,11 @@ This is a **standalone Python application** that audits PDF files for common acc
 
 The application uses **rules-based logic**, not generative AI. Its audit rules inspect the PDF object structure, metadata, extractable text, images, forms, and navigation features through `pypdf`. Its remediation rules make only predefined, non-destructive changes that can be applied safely without inventing document meaning.
 
+## Change tracking
+
+- [Changelog](CHANGELOG.md)
+- [September 21, 2026 customer accessibility validation](docs/customer-validation/2026-09-21-accessibility-testing.md)
+
 ## Accessibility-rule basis
 
 The encoded screening policy was derived from a project-specific source document named `ADA Title II Web Accessibility.docx`. That document identifies PDF documents as in scope, calls for full PDF/UA conformance, references WCAG 2.1 Level AA and Section 508, and identifies requirements including:
@@ -17,14 +22,14 @@ The source policy document is intentionally excluded from this public repository
 
 The automated audit reports the same 32 named rule areas shown by the Acrobat accessibility report: document properties, page-content tagging, forms, alternate text, tables, lists, and heading nesting. Each rule is reported as pass, fail, manual review, skipped, or not applicable. The checks are independently implemented with `pypdf`; they do not invoke or reproduce Adobe's proprietary checker, so results can differ where Acrobat uses undocumented logic.
 
-The remediator can set a missing default language, add title metadata derived from the filename, enable display of the document title, and select structure-based tab order. For an untagged document, it can add a baseline structure tree that tags text objects as paragraphs, image draws as figures, and layout graphics as artifacts. Image-only pages receive a page-level Figure tag. It does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
+The remediator can set a missing default language, enable title display when a meaningful title already exists, and select structure-based tab order when the source has a validated structure tree. It does not derive titles from filenames or infer semantic tags from drawing operators because those changes can hide meaningful content or create false accessibility passes. It also does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
 
 ### Acrobat-aligned rule coverage
 
 | Category | Rules reported | Automatic remediation |
 | --- | --- | --- |
-| Document | Accessibility permission flag, Image-only PDF, Tagged PDF, Logical Reading Order, Primary language, Title, Bookmarks, Color contrast | Adds baseline tags, language, title, and title-display preference. OCR, bookmarks, reading order, permissions, and contrast remain unresolved or manual when they fail. |
-| Page Content | Tagged content, Tagged annotations, Tab order, Character encoding, Tagged multimedia, Screen flicker, Scripts, Timed responses, Navigation links | Tags baseline page content and sets structure-based tab order. Annotation, encoding, multimedia, script, timing, flicker, and link issues are reported but are not rewritten automatically. |
+| Document | Accessibility permission flag, Image-only PDF, Tagged PDF, Logical Reading Order, Primary language, Title, Bookmarks, Color contrast | Adds a missing default language and enables title display for an existing title. Semantic tagging, title authoring, OCR, bookmarks, reading order, permissions, and contrast remain unresolved or manual when they fail. |
+| Page Content | Tagged content, Tagged annotations, Tab order, Character encoding, Tagged multimedia, Screen flicker, Scripts, Timed responses, Navigation links | Sets structure-based tab order only for a document whose structure validates. Encoding remains manual unless extraction errors establish a failure; annotation, multimedia, script, timing, flicker, and link issues are reported but are not rewritten automatically. |
 | Forms | Tagged form fields, Field descriptions | Validates field tagging and accessible names. It does not invent missing field descriptions or restructure form widgets. |
 | Alternate Text | Figures alternate text, Nested alternate text, Associated with content, Hides annotation, Other elements alternate text | Validates structure and associations. It does not invent meaningful alternate text. |
 | Tables | Rows, TH and TD, Headers, Regularity, Summary | Validates existing table tags. It does not infer or rebuild table semantics. |
@@ -107,9 +112,9 @@ The two input paths shown above are supported as follows:
 
 Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
 
-The browser accepts PDF files up to 20 MB and remediation JSON files up to 5 MB. A remediation report must satisfy either the canonical `findings` schema or the supported 32-rule Markdown-report schema. Invalid uploads are rejected. The uploaded report controls which findings are remediated, while the PDF uploaded in the browser remains the source document.
+The browser accepts PDF files up to 20 MB and remediation JSON payloads up to exactly 5 MiB, excluding multipart framing. A remediation report must satisfy either the canonical `findings` schema or the supported Markdown-report schema. Invalid uploads and reports naming a different source PDF are rejected as client errors. The uploaded report controls which findings are considered, while the PDF uploaded in the browser remains the source document.
 
-Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title metadata, title display preference, structured tab order, and baseline paragraph, figure, and artifact tagging for untagged documents. After remediation, all 32 rules appear in the result report as already passed, remediated, unresolved, manual, skipped, or not applicable. The application does **not** invent OCR text or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance.
+Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title display for an existing title, and structured tab order for an already validated structure tree. After remediation, all imported rules appear in the result report as already passed, remediated, unresolved, manual, skipped, or not applicable. A repair is reported only when the same local check changes from non-passing before remediation to passing afterward. The before/after score uses the local auditor on both PDFs; an imported-status score is displayed separately. The application does **not** invent document titles, semantic tags, OCR text, or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance.
 
 Run only the audit:
 
@@ -141,7 +146,7 @@ An audit JSON generated by another application can be used when it follows the s
 }
 ```
 
-The Markdown report must contain exactly one recognizable status row for each of the 32 supported rule areas. Rule names are normalized to the local `ACR-*` identifiers, statuses are converted to the local vocabulary, and details from the seven-column failures table are retained when present. Missing rules, duplicate rules, and unknown statuses are rejected instead of being inferred. Canonical JSON reports with a structured `findings` array continue to load unchanged.
+The Markdown report must contain exactly one recognizable status row for each of the 32 supported rule areas. Additional rules, such as Language of Parts, are retained with generated `EXT-*` identifiers instead of being silently dropped. Rule names are normalized to the local `ACR-*` identifiers, statuses are converted to the local vocabulary, page ranges are expanded, and source severity labels, standards/best-practice text, evidence notes, remediation guidance, and the manual verification queue are retained when present. Missing required rules, duplicate rules, and unknown statuses are rejected instead of being inferred. Canonical JSON reports with a structured `findings` array continue to load unchanged.
 
 ### ADA Checker remediation API
 
@@ -150,7 +155,7 @@ The workflow server exposes `POST /api/remediate` for integration with the ADA A
 - `file`: the original PDF, up to 20 MB.
 - `remediation_report`: the checker's JSON report, up to 5 MB.
 
-The report filename must match the uploaded PDF and must contain all 32 supported rule rows. A successful request returns the remediated PDF as `application/pdf`. Source PDFs, report JSON, and intermediate files are processed in an automatically deleted temporary directory; the API response is not written to the application output folder.
+The report filename must match the uploaded PDF and must contain all 32 supported rule rows; additional rows are allowed and retained. A successful request returns the remediated PDF as `application/pdf`. Source PDFs, report JSON, and intermediate files are processed in an automatically deleted temporary directory; the API response is not written to the application output folder.
 
 Set `REMEDIATOR_API_KEY` to require callers to send the same value in the `X-Remediator-Key` header. The API remains unauthenticated when the setting is empty, which is suitable only for local development. Azure deployments should provide this value through a secure deployment parameter or secret-backed application setting.
 
