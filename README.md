@@ -4,6 +4,22 @@ This is a **standalone Python application** that audits PDF files for common acc
 
 The application uses **rules-based logic**, not generative AI. Its audit rules inspect the PDF object structure, metadata, extractable text, images, forms, and navigation features through `pypdf`. Its remediation rules make only predefined, non-destructive changes that can be applied safely without inventing document meaning.
 
+## Role in the two-repository system
+
+This repository owns PDF remediation. The customer-facing checker and frontend are maintained separately in [`rayxfelipe/ADA-Accessibility-Checker`](https://github.com/rayxfelipe/ADA-Accessibility-Checker), a permanent LADBS fork of Said's checker.
+
+The integrated production flow is:
+
+```text
+Browser -> ADA Checker fork -> compliance report and remediation JSON
+        -> PDF ADA Remediator -> remediated PDF
+        -> ADA Checker fork recheck and comparison
+```
+
+The checker owns compliance assessment, findings, evidence, the remediation JSON, and the user experience. This application owns validation of that handoff, deterministic PDF changes, preservation of the original PDF, and return of the remediated copy.
+
+The versioned JSON payload is the contract between the repositories. Changes to the contract require regression testing in both repositories before either application is considered production-ready. Updates adopted from Said's upstream checker must first pass the maintained fork's checker, contract, remediation, and end-to-end regression tests.
+
 ## Change tracking
 
 - [Changelog](CHANGELOG.md)
