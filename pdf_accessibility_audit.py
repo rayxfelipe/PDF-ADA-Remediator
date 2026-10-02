@@ -553,7 +553,11 @@ def _external_context(markdown: str) -> tuple[list[str], list[str]]:
     notes = []
     for line in markdown.splitlines():
         stripped = line.strip()
-        if re.match(r"\*\*(?:Overall Status|File name|Standards Applied):\*\*", stripped, re.IGNORECASE):
+        if re.match(
+            r"^(?:\*\*)?(?:Overall Status|File name|Standards Applied):(?:\*\*)?",
+            stripped,
+            re.IGNORECASE,
+        ):
             notes.append(stripped.replace("**", ""))
 
     tasks = []

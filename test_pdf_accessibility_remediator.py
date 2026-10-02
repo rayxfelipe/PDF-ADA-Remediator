@@ -15,7 +15,7 @@ from pypdf.generic import (
 )
 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
-from pdf_accessibility_remediator import remediate_from_json
+from pdf_accessibility_remediator import remediate_from_json, write_remediation_html
 from pdf_accessibility_workflow import (
     MAX_REMEDIATION_JSON_BYTES,
     _parse_api_remediation_upload,
@@ -197,10 +197,15 @@ class AccessibilityRemediationTests(unittest.TestCase):
             ])
             report_path = root / "external-report.json"
             report_path.write_text(json.dumps({
+                "schemaVersion": 2,
                 "fileName": source.name,
+                "assessment": {
+                    "standardsApplied": "WCAG 2.1 A and AA.",
+                    "summary": {"fail": 1},
+                },
                 "remediationReport": (
                     "**Overall Status:** CONFORMANCE NOT ESTABLISHED.\n\n"
-                    "**Standards Applied:** WCAG 2.1 A and AA.\n\n"
+                    "Standards Applied: WCAG 2.1 A and AA.\n\n"
                     + "\n".join(rows)
                 ),
             }), encoding="utf-8")
@@ -214,6 +219,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(additional.source_requirement, "REQUIRED — WCAG 3.1.2")
         self.assertEqual(len(converted.findings), len(ACROBAT_RULE_IDS) + 1)
         self.assertIn("CONFORMANCE NOT ESTABLISHED", converted.source_notes[0])
+        self.assertEqual(converted.source_notes[1], "Standards Applied: WCAG 2.1 A and AA.")
         self.assertEqual(converted.manual_tasks, ["Assistive technology: Verify language changes are announced."])
 
     def test_report_includes_external_remediation_upload(self) -> None:
@@ -340,9 +346,17 @@ class AccessibilityRemediationTests(unittest.TestCase):
             report_path = write_json(imported, root / "audit.json")
 
             result = remediate_from_json(report_path, root / "output.pdf", source_pdf=source)
+            html_path = write_remediation_html(result, root / "result.html")
+            document = html_path.read_text(encoding="utf-8")
 
         self.assertEqual(result.source_score, 30)
         self.assertEqual(result.before_score, local_before.score)
+        self.assertEqual(result.source_summary, imported.summary)
+        self.assertEqual(result.before_summary, local_before.summary)
+        self.assertEqual(result.after_summary, result.after_audit.summary)
+        self.assertIn("Same-basis before and after comparison", document)
+        self.assertIn("Imported checker result", document)
+        self.assertIn("Do not compare them with the local output values", document)
         encoding = next(item for item in result.items if item.check_id == "ACR-PAGE-004")
         self.assertEqual(encoding.status, "manual")
 

@@ -38,6 +38,8 @@ The remediator can set a missing default language, enable title display when a m
 
 The remediation results report includes every rule, including rules that already passed, were remediated, remain unresolved, require manual review, were skipped, or do not apply. A reported rule is not necessarily an automatically repairable rule.
 
+The results page separates the imported checker score and counts from the local before-and-after comparison. Only the local values are presented as a change because they use the same implementation and rule basis on both PDFs. A later third-party checker run can use a different evidence tier or interpretation and should be compared rule by rule rather than treated as a remediation regression solely from its aggregate pass count.
+
 > This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
 
 ## Setup

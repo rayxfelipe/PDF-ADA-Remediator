@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Compare pre-remediation and post-remediation scores using the same local audit implementation, while displaying the input report score separately.
+- Display same-basis local pass, fail, and manual-review counts separately from imported checker counts.
 - Preserve external report evidence notes, source severity labels, WCAG or best-practice distinctions, remediation guidance, and manual verification tasks.
 - Retain additional external findings outside the 32 Acrobat-named rules using stable `EXT-*` identifiers.
 - Treat successful text extraction as insufficient evidence of valid character encoding; object-level or assistive-technology verification is now required.
@@ -22,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Recognize external report context headers such as `Standards Applied` in both plain-text and bold Markdown formats.
 - Expand external page expressions such as `1-6` and `1, 3-5` into complete page lists.
 - Reject empty structure trees and marked content without valid structure-element mappings.
 - Match supported legacy finding identifiers to their current Acrobat-aligned checks during outcome reporting.
