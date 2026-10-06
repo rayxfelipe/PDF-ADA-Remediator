@@ -11,8 +11,8 @@ from urllib.parse import parse_qs, quote
 
 import azure.functions as func
 
-from pdf_accessibility_audit import audit_pdf, write_html, write_json
-from pdf_accessibility_remediator import remediate_from_json, write_remediation_html
+from pdf_accessibility_audit import audit_pdf, write_html
+from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -139,21 +139,11 @@ def _audit_upload(req: func.HttpRequest) -> func.HttpResponse:
     with tempfile.TemporaryDirectory() as directory:
         source = Path(directory) / filename
         report_file = Path(directory) / "report.html"
-        audit_json_file = Path(directory) / "audit.json"
         source.write_bytes(body)
         report = audit_pdf(source)
-        write_json(report, audit_json_file)
         remediation_url = _route_url(req, "remediate", job=job_id)
         write_html(report, report_file, remediation_url, token)
         result = report_file.read_text(encoding="utf-8")
-        audit_json = audit_json_file.read_bytes()
-
-    audit_blob = _container_client().get_blob_client(_job_blob(job_id, "audit.json"))
-    audit_blob.upload_blob(
-        audit_json,
-        overwrite=False,
-        content_settings=ContentSettings(content_type="application/json"),
-    )
     return func.HttpResponse(result, mimetype="text/html", status_code=200)
 
 
@@ -167,18 +157,14 @@ def _remediate(req: func.HttpRequest) -> func.HttpResponse:
         metadata = _validate_token(job_id, token)
         source_blob = _container_client().get_blob_client(_job_blob(job_id, "source.pdf"))
         source_bytes = source_blob.download_blob().readall()
-        audit_blob = _container_client().get_blob_client(_job_blob(job_id, "audit.json"))
-        audit_json_bytes = audit_blob.download_blob().readall()
         filename = _safe_filename(metadata.get("filename", "document.pdf"))
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / filename
-            audit_json_file = Path(directory) / "audit.json"
             remediated = source.with_name(f"{source.stem}_remediated.pdf")
             result_file = Path(directory) / "remediation-report.html"
             source.write_bytes(source_bytes)
-            audit_json_file.write_bytes(audit_json_bytes)
-            report = remediate_from_json(audit_json_file, remediated, source_pdf=source)
+            report = remediate_pdf(source, remediated)
             remediated_bytes = remediated.read_bytes()
             download_url = _route_url(req, "download", job=job_id, token=token)
             write_remediation_html(report, result_file, download_url)

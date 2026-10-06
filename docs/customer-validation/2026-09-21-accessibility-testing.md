@@ -1,5 +1,7 @@
 # Customer Accessibility Validation - September 21, 2026
 
+> **Historical record:** This validation describes the former external-report integration. That integration was removed on 2026-10-06. The current application performs its own deterministic audit, remediation planning, remediation, and verification without accepting another application's report as input.
+
 ## Purpose
 
 This record captures the repository-relevant results of customer testing performed on September 21, 2026, the resulting implementation changes, and the work that remains dependent on another application or qualified human review.

@@ -1,249 +1,202 @@
-# PDF Accessibility Screening and Remediation
+# Deterministic PDF Accessibility Checker and Remediator
 
-This is a **standalone Python application** that audits PDF files for common accessibility barriers and applies a limited set of deterministic remediations. The local workflow runs entirely on the user's computer and does not require Azure, an LLM, Microsoft Agent Framework, an API key, or an internet connection after its Python dependencies are installed.
+This repository contains a standalone Python application that deterministically checks PDF files, applies a limited set of safe remediations, and verifies the resulting PDF with the same ruleset.
 
-The application uses **rules-based logic**, not generative AI. Its audit rules inspect the PDF object structure, metadata, extractable text, images, forms, and navigation features through `pypdf`. Its remediation rules make only predefined, non-destructive changes that can be applied safely without inventing document meaning.
+The application does not require an LLM, Microsoft Foundry, an external accessibility service, or an external audit report. Its findings and remediation decisions are derived directly from the uploaded PDF through `pypdf`.
 
-## Role in the two-repository system
-
-This repository owns PDF remediation. The customer-facing checker and frontend are maintained separately in [`rayxfelipe/ADA-Accessibility-Checker`](https://github.com/rayxfelipe/ADA-Accessibility-Checker), a permanent LADBS fork of Said's checker.
-
-The integrated production flow is:
+## Architecture
 
 ```text
-Browser -> ADA Checker fork -> compliance report and remediation JSON
-        -> PDF ADA Remediator -> remediated PDF
-        -> ADA Checker fork recheck and comparison
+PDF intake
+  -> deterministic PDF inspection
+  -> structured findings
+  -> local remediation plan
+  -> deterministic remediation
+  -> deterministic reinspection
+  -> verified before/after report
 ```
 
-The checker owns compliance assessment, findings, evidence, the remediation JSON, and the user experience. This application owns validation of that handoff, deterministic PDF changes, preservation of the original PDF, and return of the remediated copy.
+The source PDF is the only remediation input. Audit JSON is an output artifact and is never accepted as executable remediation instructions.
 
-The versioned JSON payload is the contract between the repositories. Changes to the contract require regression testing in both repositories before either application is considered production-ready. Updates adopted from Said's upstream checker must first pass the maintained fork's checker, contract, remediation, and end-to-end regression tests.
+Every audit report includes:
 
-## Change tracking
+- Schema version
+- Checker version
+- Ruleset version
+- Source filename
+- Source SHA-256
+- Page count
+- Stable rule identifiers
+- Structured findings
+- Evidence and remediation guidance
 
-- [Changelog](CHANGELOG.md)
-- [September 21, 2026 customer accessibility validation](docs/customer-validation/2026-09-21-accessibility-testing.md)
+Every remediation report includes:
 
-## Accessibility-rule basis
+- Source and output SHA-256 values
+- Checker and ruleset versions
+- Before and after summaries
+- Planned and verified actions
+- Rule-level outcomes
+- Items requiring human review
 
-The encoded screening policy was derived from a project-specific source document named `ADA Title II Web Accessibility.docx`. That document identifies PDF documents as in scope, calls for full PDF/UA conformance, references WCAG 2.1 Level AA and Section 508, and identifies requirements including:
+## Scope
 
-- Text alternatives for non-text content
-- Keyboard navigation and operation
-- A minimum 4.5:1 text color-contrast ratio
-- Semantic PDF structure consistent with PDF/UA expectations
+The checker reports 32 Acrobat-aligned accessibility rule areas covering:
 
-The source policy document is intentionally excluded from this public repository. Its relevant screening requirements are represented in the application as named rules, and every finding identifies the source requirement used by that rule.
+- Document properties
+- Page content and navigation
+- Forms
+- Alternate text
+- Tables
+- Lists
+- Heading nesting
 
-The automated audit reports the same 32 named rule areas shown by the Acrobat accessibility report: document properties, page-content tagging, forms, alternate text, tables, lists, and heading nesting. Each rule is reported as pass, fail, manual review, skipped, or not applicable. The checks are independently implemented with `pypdf`; they do not invoke or reproduce Adobe's proprietary checker, so results can differ where Acrobat uses undocumented logic.
+The rules are independently implemented with `pypdf`. They do not invoke or reproduce Adobe's proprietary checker, so results can differ where Adobe uses undocumented logic.
 
-The remediator can set a missing default language, enable title display when a meaningful title already exists, and select structure-based tab order when the source has a validated structure tree. It does not derive titles from filenames or infer semantic tags from drawing operators because those changes can hide meaningful content or create false accessibility passes. It also does not generate OCR text or alternate-text meaning, infer headings or tables, change visual contrast, or make legal compliance determinations.
+The remediator currently applies only these deterministic changes:
 
-### Acrobat-aligned rule coverage
+- Add a missing default document language.
+- Enable title display when a meaningful title already exists.
+- Set structure-based page tab order when the existing structure tree passes local validation.
 
-| Category | Rules reported | Automatic remediation |
-| --- | --- | --- |
-| Document | Accessibility permission flag, Image-only PDF, Tagged PDF, Logical Reading Order, Primary language, Title, Bookmarks, Color contrast | Adds a missing default language and enables title display for an existing title. Semantic tagging, title authoring, OCR, bookmarks, reading order, permissions, and contrast remain unresolved or manual when they fail. |
-| Page Content | Tagged content, Tagged annotations, Tab order, Character encoding, Tagged multimedia, Screen flicker, Scripts, Timed responses, Navigation links | Sets structure-based tab order only for a document whose structure validates. Encoding remains manual unless extraction errors establish a failure; annotation, multimedia, script, timing, flicker, and link issues are reported but are not rewritten automatically. |
-| Forms | Tagged form fields, Field descriptions | Validates field tagging and accessible names. It does not invent missing field descriptions or restructure form widgets. |
-| Alternate Text | Figures alternate text, Nested alternate text, Associated with content, Hides annotation, Other elements alternate text | Validates structure and associations. It does not invent meaningful alternate text. |
-| Tables | Rows, TH and TD, Headers, Regularity, Summary | Validates existing table tags. It does not infer or rebuild table semantics. |
-| Lists | List items, Lbl and LBody | Validates existing list hierarchy. It does not infer or rebuild lists. |
-| Headings | Appropriate nesting | Validates heading-level order. It does not infer headings from visual formatting. |
+The remediator does not:
 
-The remediation results report includes every rule, including rules that already passed, were remediated, remain unresolved, require manual review, were skipped, or do not apply. A reported rule is not necessarily an automatically repairable rule.
+- Invent document titles.
+- Accept generic titles such as `PowerPoint Presentation` as meaningful.
+- Generate semantic tags.
+- Generate OCR text.
+- Invent alternate text.
+- Infer tables, lists, or headings from visual formatting.
+- Alter visual contrast.
+- Claim ADA, WCAG, PDF/UA, or Section 508 conformance.
 
-The results page separates the imported checker score and counts from the local before-and-after comparison. Only the local values are presented as a change because they use the same implementation and rule basis on both PDFs. A later third-party checker run can use a different evidence tier or interpretation and should be compared rule by rule rather than treated as a remediation regression solely from its aggregate pass count.
+Human and assistive-technology review remains necessary for semantic quality, reading order, usability, and complete conformance evaluation.
 
-> This tool is an automated screening and limited-remediation utility. It does not certify ADA, PDF/UA, WCAG, or Section 508 compliance and is not legal advice. Full conformance cannot be established by these automated checks. A qualified human review with assistive technology is required.
+## Requirements
 
-## Setup
+- Python 3.10 or newer
+- Dependencies in `requirements.txt`
 
-Create and activate a Python 3.10+ virtual environment, then install dependencies:
+Install dependencies:
 
-    pip install -r requirements.txt
-
-No Azure subscription, LLM, API key, or Microsoft Agent Framework configuration is required for the local three-script workflow.
-
-## Run the complete workflow
-
-    python pdf_accessibility_workflow.py
-
-The command starts a local HTTP server on `127.0.0.1`, selects an available port, and opens the PDF upload page in the default browser. The terminal must remain running while the page is in use. This local URL is accessible only from the computer running the command.
-
-The workflow uses three separate programs:
-
-1. `pdf_accessibility_audit.py` audits a PDF and can write JSON plus HTML reports when run directly.
-2. `pdf_accessibility_remediator.py` accepts a JSON report and creates a remediated PDF copy when run directly.
-3. `pdf_accessibility_workflow.py` opens an upload page, audits the selected PDF, and waits. It invokes the remediator only after the user applies the generated audit or uploads a valid third-party remediation JSON report.
-
-The complete workflow:
-
-1. Starts without requiring a PDF command-line argument.
-2. Accepts a PDF through the local browser page and processes it using memory and automatically deleted temporary files.
-3. Creates the audit JSON and HTML in temporary storage and displays the audit report.
-4. Waits for the user to apply the generated audit or upload a third-party remediation JSON report in the browser.
-5. Validates uploaded JSON in temporary storage without retaining it.
-6. Only after either remediation action, saves `reports/remediated/<original-name>_remediated.pdf`, re-audits it temporarily, and displays the remediation results.
-7. Provides a **Home** button on the audit and remediation pages that clears the current upload and returns to the PDF upload screen.
-
-The complete workflow persists only its remediated PDF:
-
-```text
-reports/
-└── remediated/     Remediated PDF output
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-The entire `reports/` tree is excluded from Git because remediated PDFs can contain customer information. Uploaded source PDFs, generated audit data, uploaded remediation JSON, and HTML reports are discarded when the workflow server stops.
+## Run the browser workflow
 
-## Workflow Diagram
-
-The JSON audit report is the handoff contract between auditing and remediation. Customers can generate it with the included rules-based auditor or supply a compatible report from another application. The standalone remediator reads that persisted JSON together with the associated source PDF. It never overwrites the source PDF: when remediation is requested, it creates a new copy and then re-audits that copy to document successful, unresolved, and manual-review items.
-
-```mermaid
-flowchart LR
-    A["Browser PDF upload"] --> B["In-memory source PDF"]
-    B --> C["Temporary rules-based audit"]
-
-    X["Compatible external auditor"] --> Y["Browser JSON upload"]
-
-    C --> E{"Customer requests remediation?"}
-    Y --> G
-    E -- "No" --> F["No PDF changes"]
-    E -- "Yes" --> G["Standalone remediator"]
-    B --> G
-    G --> H["reports/remediated/&lt;file_name&gt;_remediated.pdf"]
-    H --> I["Temporary verification report"]
-
-    B -. "Discarded when server stops" .-> H
+```powershell
+python pdf_accessibility_workflow.py
 ```
 
-The two input paths shown above are supported as follows:
+The workflow:
 
-- **Included audit path:** the complete workflow inspects the uploaded source PDF and keeps its JSON contract and HTML report temporary.
-- **External audit path:** another application may provide either the canonical JSON contract or the supported Markdown-report JSON format through the browser upload.
-- **Approval boundary:** the complete interactive workflow offers **Yes, apply remediation** for the generated audit and **Upload remediation JSON file** for a third-party report. Either action is an explicit remediation request. Running the standalone remediator is also an explicit request.
-- **Output behavior:** only the remediated PDF is written under `reports/remediated`. The uploaded original is never written to a persistent application path.
-- **Home navigation:** selecting **Home** clears the current in-memory workflow state and returns to the initial PDF upload screen.
-- **Verification:** the remediated copy is audited again, and the temporary HTML result identifies remediated, unresolved, and manual-review findings.
+1. Starts a local HTTP server.
+2. Accepts a PDF upload.
+3. Runs the deterministic checker.
+4. Displays the audit report.
+5. Waits for explicit approval.
+6. Builds a remediation plan from the same local audit.
+7. Writes a remediated copy without overwriting the source.
+8. Rechecks the output and displays verified results.
 
-Keep the terminal running while viewing the report. Press Ctrl+C when finished. Use `--no-open` to print the local report URL without automatically opening the browser.
+Use `--no-open` to prevent the browser from opening automatically:
 
-The browser accepts PDF files up to 20 MB and remediation JSON payloads up to exactly 5 MiB, excluding multipart framing. A remediation report must satisfy either the canonical `findings` schema or the supported Markdown-report schema. Invalid uploads and reports naming a different source PDF are rejected as client errors. The uploaded report controls which findings are considered, while the PDF uploaded in the browser remains the source document.
+```powershell
+python pdf_accessibility_workflow.py --no-open
+```
 
-Automatic remediation applies only deterministic PDF/UA-related updates supported by the source policy: default language, title display for an existing title, and structured tab order for an already validated structure tree. After remediation, all imported rules appear in the result report as already passed, remediated, unresolved, manual, skipped, or not applicable. A repair is reported only when the same local check changes from non-passing before remediation to passing afterward. The before/after score uses the local auditor on both PDFs; an imported-status score is displayed separately. The application does **not** invent document titles, semantic tags, OCR text, or meaningful text alternatives, infer tables/headings, alter visual contrast, or certify ADA compliance.
+Uploaded source PDFs and temporary reports are held only for the active workflow session. The local workflow persists only the remediated output under `reports/remediated`.
 
-Run only the audit:
+## Run the checker
 
-    python pdf_accessibility_audit.py "document.pdf" --no-open
+```powershell
+python pdf_accessibility_audit.py "document.pdf" --no-open
+```
 
-Run only remediation, using the audit JSON:
-
-    python pdf_accessibility_remediator.py "reports/incoming/accessibility-report-document.json" --pdf "pdf_files/document.pdf" --no-open
-
-The audit command writes its HTML and JSON outputs under `reports/audits`. The remediation command writes the new PDF and its HTML result under `reports/remediated`. Explicit output options still override these defaults.
-
-Default standalone-script outputs are:
+Default outputs:
 
 - `reports/audits/accessibility-report.html`
 - `reports/audits/accessibility-report-<file_name>.json`
-- `reports/remediated/<file_name>_remediated.pdf`
-- `reports/remediated/<file_name>-remediation.html` for the standalone remediator
 
-The complete workflow saves only `reports/remediated/<file_name>_remediated.pdf`.
+## Run remediation
 
-Running the tools again for the same filename replaces the corresponding default output. Use the output options when each run must be retained separately.
+Remediation accepts the source PDF directly:
 
-An audit JSON generated by another application can be used when it follows the same JSON structure emitted by `pdf_accessibility_audit.py`. Store external inputs under `reports/incoming`. The remediator also accepts the external Markdown-report format used by `reports/incoming/T00700020111-remediation.json`:
-
-```json
-{
-    "fileName": "document.pdf",
-    "remediationReport": "| Rule | Severity | Status |\n|---|---|---|\n..."
-}
+```powershell
+python pdf_accessibility_remediator.py "document.pdf" --no-open
 ```
 
-The Markdown report must contain exactly one recognizable status row for each of the 32 supported rule areas. Additional rules, such as Language of Parts, are retained with generated `EXT-*` identifiers instead of being silently dropped. Rule names are normalized to the local `ACR-*` identifiers, statuses are converted to the local vocabulary, page ranges are expanded, and source severity labels, standards/best-practice text, evidence notes, remediation guidance, and the manual verification queue are retained when present. Missing required rules, duplicate rules, and unknown statuses are rejected instead of being inferred. Canonical JSON reports with a structured `findings` array continue to load unchanged.
+Optional arguments:
 
-### ADA Checker remediation API
+```powershell
+python pdf_accessibility_remediator.py "document.pdf" `
+  --output "reports/remediated/document_remediated.pdf" `
+  --report "reports/remediated/document-remediation.html" `
+  --language "en-US" `
+  --no-open
+```
 
-The workflow server exposes `POST /api/remediate` for integration with the ADA Accessibility Checker. The request must use `multipart/form-data` with:
+No audit JSON or third-party report is accepted as remediation input.
 
-- `file`: the original PDF, up to 20 MB.
-- `remediation_report`: the checker's JSON report, up to 5 MB.
+## PDF-only remediation API
 
-The report filename must match the uploaded PDF and must contain all 32 supported rule rows; additional rows are allowed and retained. A successful request returns the remediated PDF as `application/pdf`. Source PDFs, report JSON, and intermediate files are processed in an automatically deleted temporary directory; the API response is not written to the application output folder.
+The local workflow exposes `POST /api/remediate`. The request uses `multipart/form-data` with one field:
 
-Set `REMEDIATOR_API_KEY` to require callers to send the same value in the `X-Remediator-Key` header. The API remains unauthenticated when the setting is empty, which is suitable only for local development. Azure deployments should provide this value through a secure deployment parameter or secret-backed application setting.
+- `pdf`: source PDF, up to 20 MB
 
-When `--pdf` is omitted, name canonical reports using one of these forms so the remediator can infer the PDF filename:
+The endpoint audits, remediates, and verifies the PDF locally. It returns the remediated file as `application/pdf`.
 
-- `accessibility-report-document.json` for `document.pdf`
-- `accessibility-report-document.pdf.json` for `document.pdf`
+Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` request header. Leaving the setting empty is suitable only for local development.
 
-If the PDF is elsewhere or the external JSON's stored `file` path came from another computer, provide the PDF explicitly:
+## Azure Functions
 
-    python pdf_accessibility_remediator.py "reports/incoming/accessibility-report-document.json" --pdf "pdf_files/document.pdf" --no-open
+[function_app.py](./function_app.py) provides the Azure-hosted browser workflow:
 
-Output paths remain optional overrides:
+1. Upload and deterministically audit a PDF.
+2. Store the active job's source PDF in private blob storage.
+3. Require the job token before remediation or download.
+4. Re-audit the stored source immediately before remediation.
+5. Return a verified remediated PDF.
 
-    python pdf_accessibility_remediator.py "reports/incoming/accessibility-report-document.json" --pdf "pdf_files/document.pdf" --output "custom/document_remediated.pdf" --report "custom/remediation.html" --no-open
+The Azure workflow does not call or depend on another checker application.
 
-The remediator reads the persisted JSON file before opening and modifying the associated PDF. It does not rerun the original audit in place of that input. After writing the remediated copy, it audits the new copy to report which findings changed.
+## Deterministic behavior
 
-Choose a custom complete-workflow output path:
+For identical PDF bytes and the same checker and ruleset versions:
 
-    python pdf_accessibility_workflow.py --remediated-output "custom/document_remediated.pdf"
+- Source SHA-256 remains identical.
+- Findings and summaries remain identical.
+- The same remediation plan is produced.
+- Repeated remediation produces the same logical PDF-object changes.
 
-## Exit codes
+Generation timestamps and serialized PDF bytes can differ when a PDF library rewrites a document. Verification therefore compares identified source/output hashes and rule-level object evidence rather than assuming byte-for-byte equality.
 
-- `0`: audit completed, even if accessibility failures were found
-- `1`: PDF parsing or unexpected audit error
-- `2`: invalid input, inaccessible/encrypted PDF, or output error
+## Tests
 
-The numerical score covers only automated checks. Manual-review items are excluded from the score and must not be treated as passed.
+Run the complete test suite:
 
-## Deploy to Azure with GitHub Copilot
+```powershell
+python -m unittest -v
+```
 
-The repository includes `Dockerfile.azure` and Bicep infrastructure under `infra/` for an Azure App Service Linux container deployment. A repository user can clone the project, open it in VS Code with GitHub Copilot, authenticate to Azure, and ask Copilot to deploy the application into the user's own subscription.
+The tests cover:
 
-Suggested prompt:
+- Stable 32-rule output
+- Repeated deterministic audits
+- Source hashing and contract versions
+- Language remediation
+- Meaningful-title handling
+- Generic-title rejection
+- Correct `/MarkInfo /Marked = false` handling
+- Preservation of source structure and metadata
+- PDF-only workflow and API behavior
+- Verified remediation reporting
 
-> Deploy this repository to my Azure subscription using the App Service Linux container architecture in `infra/`. Generate globally unique resource names for my deployment, use the B1 Linux plan with one instance, build `Dockerfile.azure` in a private Azure Container Registry, and use the App Service managed identity for image pulls. Keep HTTPS-only access, TLS 1.2 or later, the `/health` health check, FTP disabled, and SCM basic publishing credentials disabled. Validate both `/health` and the complete PDF upload, audit, remediation, and download workflow. Do not deploy this application with Azure Functions Flex Consumption.
+## Privacy
 
-Before deployment, the user needs:
+The `.gitignore` excludes PDFs, generated reports, local settings, virtual environments, and machine-specific validation artifacts. Do not commit customer documents, report outputs containing customer content, secrets, or credentials.
 
-- An Azure subscription and permission to create resource groups and resources.
-- Permission to create role assignments. **Owner** is sufficient; **Contributor** plus **Role Based Access Control Administrator** is another common combination.
-- Azure CLI authentication for the intended tenant and subscription.
-- Access to App Service and Azure Container Registry in the selected region, including sufficient quota.
-- VS Code and GitHub Copilot with agent capabilities if Copilot will perform the deployment.
+## Disclaimer
 
-Copilot should inspect and adapt the included infrastructure rather than reuse its example names. Azure Container Registry, App Service, and Key Vault names must be globally unique. The checked-in parameter file contains example deployment metadata and is not an authorization credential.
-
-The expected deployment creates:
-
-- One Basic Azure Container Registry containing the application image.
-- One Linux B1 App Service plan and one containerized web app.
-- One Log Analytics workspace and Application Insights resource.
-- One Key Vault.
-- Managed-identity role assignments for private container image pulls and Key Vault access.
-
-The deployed endpoint is intentionally anonymous for a controlled pilot. Uploaded source PDFs and generated reports are processed in memory or temporary storage. Remediated PDFs use the container's ephemeral filesystem and should be downloaded promptly. Keep the app at one instance until workflow sessions and generated output are moved to shared storage.
-
-The example architecture was estimated at approximately **$17.41 USD per month** in `westus2` when created, primarily for the Linux B1 App Service plan and Basic Container Registry. Pricing varies by agreement, region, currency, usage, and date; review the current Azure estimate before approving deployment.
-
-Cloning or pushing this repository does not create or update Azure resources automatically. There is no GitHub Actions deployment workflow. A GitHub push changes only the repository; publishing a new application version requires an explicit Azure container build and App Service update performed by the user, Copilot, or a future CI/CD workflow.
-
-## Repository privacy
-
-The `.gitignore` excludes PDFs, Word policy documents, generated audit/remediation reports, virtual environments, local Function settings, and machine-specific deployment validation files. This prevents new customer documents and local credentials from being added accidentally. If files were tracked before these rules were added, remove them from the Git index before publishing.
-
-The three runtime programs do not depend on test modules:
-
-- `pdf_accessibility_audit.py`
-- `pdf_accessibility_remediator.py`
-- `pdf_accessibility_workflow.py`
-
-Choose and add an appropriate `LICENSE` before making the repository public if others should be allowed to copy, modify, or redistribute the code.
+This tool performs automated accessibility screening and limited deterministic remediation. It does not certify legal or standards conformance and is not legal advice. Qualified human review and assistive-technology testing are required.

@@ -1,27 +1,17 @@
 from io import BytesIO
-from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import (
-    BooleanObject,
-    DecodedStreamObject,
-    DictionaryObject,
-    NameObject,
-    NumberObject,
-)
+from pypdf.generic import BooleanObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
-from pdf_accessibility_remediator import remediate_from_json, write_remediation_html
+from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 from pdf_accessibility_workflow import (
-    MAX_REMEDIATION_JSON_BYTES,
-    _parse_api_remediation_upload,
-    _parse_pdf_upload,
-    _parse_remediation_upload,
     _attachment_header,
+    _parse_pdf_upload,
     _valid_api_key,
     remediate_api_payload,
 )
@@ -30,7 +20,6 @@ from pdf_accessibility_workflow import (
 def _image_only_writer() -> PdfWriter:
     writer = PdfWriter()
     page = writer.add_blank_page(width=72, height=72)
-
     image = DecodedStreamObject()
     image.set_data(b"\x00")
     image.update({
@@ -45,7 +34,6 @@ def _image_only_writer() -> PdfWriter:
     page[NameObject("/Resources")] = DictionaryObject({
         NameObject("/XObject"): DictionaryObject({NameObject("/Im0"): image_ref}),
     })
-
     content = DecodedStreamObject()
     content.set_data(b"q 72 0 0 72 0 0 cm /Im0 Do Q")
     page.replace_contents(content)
@@ -74,255 +62,132 @@ def _mixed_content_writer() -> PdfWriter:
 
 
 class AccessibilityRemediationTests(unittest.TestCase):
-    def test_audit_and_remediation_cover_every_acrobat_rule(self) -> None:
-        with TemporaryDirectory() as folder:
-            root = Path(folder)
-            source = root / "mixed.pdf"
-            writer = _mixed_content_writer()
-            with source.open("wb") as stream:
-                writer.write(stream)
-
-            before = audit_pdf(source)
-            audit_path = write_json(before, root / "accessibility-report-mixed.json")
-            result = remediate_from_json(audit_path, root / "mixed-remediated.pdf", source_pdf=source)
-
-        self.assertEqual(tuple(item.check_id for item in before.findings), ACROBAT_RULE_IDS)
-        self.assertEqual(len(result.items), len(ACROBAT_RULE_IDS))
-        self.assertEqual(len(result.after_audit.findings), len(ACROBAT_RULE_IDS))
-        statuses = {item.check_id: item.status for item in result.items}
-        self.assertEqual(statuses["ACR-DOC-003"], "failed")
-        self.assertEqual(statuses["ACR-DOC-005"], "success")
-        self.assertEqual(statuses["ACR-DOC-006"], "failed")
-        self.assertEqual(statuses["ACR-PAGE-001"], "failed")
-        self.assertEqual(statuses["ACR-PAGE-003"], "failed")
-        self.assertEqual(statuses["ACR-PAGE-004"], "manual")
-        self.assertEqual(statuses["ACR-ALT-001"], "failed")
-
-    def test_converts_external_markdown_report(self) -> None:
-        with TemporaryDirectory() as folder:
-            root = Path(folder)
-            source = root / "external.pdf"
-            writer = _image_only_writer()
-            with source.open("wb") as stream:
-                writer.write(stream)
-            canonical = audit_pdf(source)
-            rows = ["| Rule | Severity | Status |", "|---|---|---|"]
-            for finding in canonical.findings:
-                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
-                rows.append(f"| {finding.requirement} | Major | {status} |")
-            rows.extend([
-                "### Failures table",
-                "| Rule | Severity | Pages | Count | Tag path/object | WCAG / Best Practice | Remediation |",
-                "|---|---|---:|---:|---|---|---|",
-                "| Primary language (/Lang on Catalog) | Critical | All | 1 | Catalog /Lang | WCAG 3.1.1 | Set /Lang to en-US. |",
-            ])
-            report_path = root / "external-report.json"
-            report_path.write_text(json.dumps({
-                "fileName": source.name,
-                "remediationReport": "**File name:** external.pdf - 1 page\n\n" + "\n".join(rows),
-            }), encoding="utf-8")
-
-            converted = read_json(report_path)
-
-        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
-        self.assertEqual(converted.page_count, 1)
-        language = next(item for item in converted.findings if item.check_id == "ACR-DOC-005")
-        self.assertEqual(language.status, "fail")
-        self.assertEqual(language.remediation, "Set /Lang to en-US.")
-
-    def test_converts_id_prefixed_bullet_summary_rows(self) -> None:
-        with TemporaryDirectory() as folder:
-            root = Path(folder)
-            source = root / "external.pdf"
-            with source.open("wb") as stream:
-                _image_only_writer().write(stream)
-            canonical = audit_pdf(source)
-            rows = []
-            for finding in canonical.findings:
-                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
-                rows.append(f"- D1 {finding.requirement} | Major | {status}")
-            report_path = root / "external-report.json"
-            report_path.write_text(json.dumps({
-                "fileName": source.name,
-                "remediationReport": "\n".join(rows),
-            }), encoding="utf-8")
-
-            converted = read_json(report_path)
-
-        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
-
-    def test_converts_em_dash_summary_rows_with_status_qualifiers(self) -> None:
-        with TemporaryDirectory() as folder:
-            root = Path(folder)
-            source = root / "external.pdf"
-            with source.open("wb") as stream:
-                _image_only_writer().write(stream)
-            canonical = audit_pdf(source)
-            rows = []
-            for index, finding in enumerate(canonical.findings, start=1):
-                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
-                qualifier = " [inferred - Tier B]" if status == "Failed" else ""
-                rows.append(f"- D{index} {finding.requirement} — Major — {status}{qualifier}")
-            report_path = root / "external-report.json"
-            report_path.write_text(json.dumps({
-                "fileName": source.name,
-                "remediationReport": "\n".join(rows),
-            }), encoding="utf-8")
-
-            converted = read_json(report_path)
-
-        self.assertEqual(tuple(item.check_id for item in converted.findings), ACROBAT_RULE_IDS)
-
-    def test_preserves_additional_rules_ranges_and_manual_queue(self) -> None:
-        with TemporaryDirectory() as folder:
-            root = Path(folder)
-            source = root / "external.pdf"
-            with source.open("wb") as stream:
-                _image_only_writer().write(stream)
-            canonical = audit_pdf(source)
-            rows = ["| Rule | Severity | Status |", "|---|---|---|"]
-            for finding in canonical.findings:
-                status = "Needs manual check" if finding.status == "manual" else "Failed" if finding.status == "fail" else "Passed"
-                rows.append(f"| {finding.requirement} | Major | {status} |")
-            rows.extend([
-                "| Language of Parts | Critical | Failed |",
-                "",
-                "### Failures table",
-                "| Rule | Severity | Pages | Count | Tag path/object | WCAG / Best Practice | Remediation |",
-                "|---|---|---:|---:|---|---|---|",
-                "| Language of Parts | Critical | 1, 3-5 | 4 | Structure spans | **REQUIRED — WCAG 3.1.2** | Mark language changes. |",
-                "",
-                "### Manual Verification Queue",
-                "1. **Assistive technology:** Verify language changes are announced.",
-            ])
-            report_path = root / "external-report.json"
-            report_path.write_text(json.dumps({
-                "schemaVersion": 2,
-                "fileName": source.name,
-                "assessment": {
-                    "standardsApplied": "WCAG 2.1 A and AA.",
-                    "summary": {"fail": 1},
-                },
-                "remediationReport": (
-                    "**Overall Status:** CONFORMANCE NOT ESTABLISHED.\n\n"
-                    "Standards Applied: WCAG 2.1 A and AA.\n\n"
-                    + "\n".join(rows)
-                ),
-            }), encoding="utf-8")
-
-            converted = read_json(report_path)
-
-        additional = next(item for item in converted.findings if item.requirement == "Language of Parts")
-        self.assertEqual(additional.check_id, "EXT-LANGUAGE-OF-PARTS")
-        self.assertEqual(additional.pages, [1, 3, 4, 5])
-        self.assertEqual(additional.source_severity, "Critical")
-        self.assertEqual(additional.source_requirement, "REQUIRED — WCAG 3.1.2")
-        self.assertEqual(len(converted.findings), len(ACROBAT_RULE_IDS) + 1)
-        self.assertIn("CONFORMANCE NOT ESTABLISHED", converted.source_notes[0])
-        self.assertEqual(converted.source_notes[1], "Standards Applied: WCAG 2.1 A and AA.")
-        self.assertEqual(converted.manual_tasks, ["Assistive technology: Verify language changes are announced."])
-
-    def test_report_includes_external_remediation_upload(self) -> None:
+    def test_audit_is_versioned_hash_bound_and_repeatable(self) -> None:
         with TemporaryDirectory() as folder:
             source = Path(folder) / "source.pdf"
             with source.open("wb") as stream:
-                _image_only_writer().write(stream)
-            report = audit_pdf(source)
-            html_path = write_html(report, Path(folder) / "report.html", "/remediate", "token-value", "/upload-remediation", "/new")
-            document = html_path.read_text(encoding="utf-8")
+                _mixed_content_writer().write(stream)
 
-        self.assertIn("Yes, apply remediation", document)
-        self.assertIn("Upload remediation JSON file", document)
-        self.assertIn('action="/upload-remediation"', document)
-        self.assertIn('enctype="multipart/form-data"', document)
-        self.assertIn('href="/new">Home</a>', document)
+            first = audit_pdf(source)
+            second = audit_pdf(source)
 
-    def test_workflow_parses_pdf_upload_in_memory(self) -> None:
-        boundary = "pdf-boundary"
-        body = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"pdf\"; filename=\"../sample.pdf\"\r\n"
-            "Content-Type: application/pdf\r\n\r\n"
-        ).encode("utf-8") + b"%PDF-1.7\ncontent\n" + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        self.assertEqual(first.schema_version, 3)
+        self.assertEqual(first.checker_version, "2.0.0")
+        self.assertEqual(first.ruleset_version, "2026.10")
+        self.assertEqual(first.source_sha256, second.source_sha256)
+        self.assertEqual(first.summary, second.summary)
+        self.assertEqual(first.findings, second.findings)
+        self.assertEqual(tuple(item.check_id for item in first.findings), ACROBAT_RULE_IDS)
 
-        filename, payload = _parse_pdf_upload(f"multipart/form-data; boundary={boundary}", body)
-
-        self.assertEqual(filename, "sample.pdf")
-        self.assertEqual(payload, b"%PDF-1.7\ncontent\n")
-
-    def test_parses_remediation_upload_in_memory(self) -> None:
-        boundary = "test-boundary"
-        body = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"token\"\r\n\r\ntoken-value\r\n"
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_json\"; filename=\"..\\external.json\"\r\n"
-            "Content-Type: application/json\r\n\r\n"
-            "{\"findings\": []}\r\n"
-            f"--{boundary}--\r\n"
-        ).encode("utf-8")
-
-        token, filename, payload = _parse_remediation_upload(f"multipart/form-data; boundary={boundary}", body)
-
-        self.assertEqual(token, "token-value")
-        self.assertEqual(filename, "external.json")
-        self.assertEqual(payload, b'{"findings": []}')
-
-    def test_rejects_remediation_payload_over_exact_limit(self) -> None:
-        boundary = "large-report"
-        body = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"token\"\r\n\r\ntoken-value\r\n"
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_json\"; filename=\"report.json\"\r\n"
-            "Content-Type: application/json\r\n\r\n"
-        ).encode() + (b"x" * (MAX_REMEDIATION_JSON_BYTES + 1)) + f"\r\n--{boundary}--\r\n".encode()
-
-        with self.assertRaisesRegex(ValueError, "exceeds"):
-            _parse_remediation_upload(f"multipart/form-data; boundary={boundary}", body)
-
-    def test_api_remediates_matching_pdf_and_report_without_persisting(self) -> None:
+    def test_audit_json_only_loads_local_structured_contract(self) -> None:
         with TemporaryDirectory() as folder:
-            source = Path(folder) / "source.pdf"
+            root = Path(folder)
+            source = root / "source.pdf"
             with source.open("wb") as stream:
-                _image_only_writer().write(stream)
-            report = audit_pdf(source)
-            report_path = write_json(report, Path(folder) / "audit.json")
+                _mixed_content_writer().write(stream)
+            original = audit_pdf(source)
+            report_path = write_json(original, root / "audit.json")
+            loaded = read_json(report_path)
+            incompatible = root / "incompatible.json"
+            incompatible.write_text(json.dumps({
+                "fileName": "source.pdf",
+                "remediationReport": "AI-generated report",
+            }), encoding="utf-8")
 
-            output_name, output = remediate_api_payload(
-                source.name,
-                source.read_bytes(),
-                report_path.read_bytes(),
-            )
+            with self.assertRaisesRegex(ValueError, "Invalid audit JSON report"):
+                read_json(incompatible)
 
-        self.assertEqual(output_name, "source_remediated.pdf")
-        self.assertTrue(output.startswith(b"%PDF-"))
-        self.assertEqual(PdfReader(BytesIO(output)).trailer["/Root"]["/Lang"], "en-US")
+        self.assertEqual(loaded.source_sha256, original.source_sha256)
+
+    def test_remediation_uses_local_audit_and_verifies_language(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            output = root / "output.pdf"
+            with source.open("wb") as stream:
+                _mixed_content_writer().write(stream)
+
+            result = remediate_pdf(source, output)
+            remediated = PdfReader(output)
+
+        self.assertEqual(remediated.trailer["/Root"]["/Lang"], "en-US")
+        self.assertNotEqual(result.source_sha256, result.output_sha256)
+        action = next(item for item in result.actions if item.action_id == "set-document-language")
+        self.assertEqual(action.result, "verified")
+        language = next(item for item in result.items if item.check_id == "ACR-DOC-005")
+        self.assertEqual(language.status, "success")
 
     def test_preserves_meaningful_title_and_enables_title_display(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
-            source = root / "250471000001745.pdf"
+            source = root / "permit.pdf"
+            output = root / "output.pdf"
             writer = _mixed_content_writer()
             writer.add_metadata({"/Title": "Permit Instructions"})
             with source.open("wb") as stream:
                 writer.write(stream)
-            report_path = write_json(audit_pdf(source), root / "audit.json")
-            output = root / "output.pdf"
 
-            result = remediate_from_json(report_path, output, source_pdf=source)
+            result = remediate_pdf(source, output)
             remediated = PdfReader(output)
 
         self.assertEqual(remediated.metadata.title, "Permit Instructions")
         self.assertTrue(remediated.trailer["/Root"]["/ViewerPreferences"]["/DisplayDocTitle"])
-        title_item = next(item for item in result.items if item.check_id == "ACR-DOC-006")
-        self.assertEqual(title_item.status, "success")
+        action = next(item for item in result.actions if item.action_id == "enable-document-title-display")
+        self.assertEqual(action.result, "verified")
 
-    def test_does_not_invent_title_or_semantic_tags(self) -> None:
+    def test_generic_title_is_not_accepted_or_enabled(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
-            source = root / "250471000001745.pdf"
+            source = root / "slides.pdf"
+            output = root / "output.pdf"
+            writer = _mixed_content_writer()
+            writer.add_metadata({"/Title": "PowerPoint Presentation"})
+            with source.open("wb") as stream:
+                writer.write(stream)
+
+            before = audit_pdf(source)
+            result = remediate_pdf(source, output)
+            remediated = PdfReader(output)
+
+        title = next(item for item in before.findings if item.check_id == "ACR-DOC-006")
+        self.assertEqual(title.status, "fail")
+        self.assertNotIn("/ViewerPreferences", remediated.trailer["/Root"])
+        self.assertFalse(any(item.action_id == "enable-document-title-display" for item in result.actions))
+
+    def test_marked_false_is_not_treated_as_tagged(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "marked-false.pdf"
+            writer = _mixed_content_writer()
+            element = DictionaryObject({
+                NameObject("/Type"): NameObject("/StructElem"),
+                NameObject("/S"): NameObject("/P"),
+                NameObject("/K"): NumberObject(0),
+            })
+            writer._root_object[NameObject("/MarkInfo")] = DictionaryObject({
+                NameObject("/Marked"): BooleanObject(False),
+            })
+            writer._root_object[NameObject("/StructTreeRoot")] = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/StructTreeRoot"),
+                NameObject("/ParentTree"): writer._add_object(DictionaryObject()),
+                NameObject("/K"): writer._add_object(element),
+            }))
+            with source.open("wb") as stream:
+                writer.write(stream)
+
+            report = audit_pdf(source)
+
+        tagged = next(item for item in report.findings if item.check_id == "ACR-DOC-003")
+        self.assertEqual(tagged.status, "fail")
+
+    def test_does_not_invent_title_or_structure(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            output = root / "output.pdf"
             with source.open("wb") as stream:
                 _mixed_content_writer().write(stream)
-            report_path = write_json(audit_pdf(source), root / "audit.json")
-            output = root / "output.pdf"
 
-            result = remediate_from_json(report_path, output, source_pdf=source)
+            result = remediate_pdf(source, output)
             remediated = PdfReader(output)
 
         self.assertFalse(remediated.metadata.title)
@@ -331,108 +196,62 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(statuses["ACR-DOC-003"], "failed")
         self.assertEqual(statuses["ACR-DOC-006"], "failed")
 
-    def test_uses_same_local_basis_for_before_and_after_scores(self) -> None:
+    def test_reports_only_deterministic_source_and_output_results(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.pdf"
+            output = root / "output.pdf"
             with source.open("wb") as stream:
                 _mixed_content_writer().write(stream)
-            local_before = audit_pdf(source)
-            imported_findings = [
-                replace(item, status="fail") if item.check_id == "ACR-PAGE-004" else item
-                for item in local_before.findings
-            ]
-            imported = replace(local_before, score=30, findings=imported_findings)
-            report_path = write_json(imported, root / "audit.json")
+            result = remediate_pdf(source, output)
+            report_path = write_remediation_html(result, root / "result.html")
+            document = report_path.read_text(encoding="utf-8")
 
-            result = remediate_from_json(report_path, root / "output.pdf", source_pdf=source)
-            html_path = write_remediation_html(result, root / "result.html")
-            document = html_path.read_text(encoding="utf-8")
+        self.assertIn("Deterministic remediation complete", document)
+        self.assertIn("Source SHA-256", document)
+        self.assertIn("Verified actions", document)
+        self.assertNotIn("Imported checker", document)
+        self.assertNotIn("third-party", document.lower())
 
-        self.assertEqual(result.source_score, 30)
-        self.assertEqual(result.before_score, local_before.score)
-        self.assertEqual(result.source_summary, imported.summary)
-        self.assertEqual(result.before_summary, local_before.summary)
-        self.assertEqual(result.after_summary, result.after_audit.summary)
-        self.assertIn("Same-basis before and after comparison", document)
-        self.assertIn("Imported checker result", document)
-        self.assertIn("Do not compare them with the local output values", document)
-        encoding = next(item for item in result.items if item.check_id == "ACR-PAGE-004")
-        self.assertEqual(encoding.status, "manual")
-
-    def test_empty_structure_tree_does_not_pass_tagging(self) -> None:
-        with TemporaryDirectory() as folder:
-            source = Path(folder) / "empty-structure.pdf"
-            writer = _mixed_content_writer()
-            writer._root_object[NameObject("/MarkInfo")] = DictionaryObject({
-                NameObject("/Marked"): BooleanObject(True),
-            })
-            writer._root_object[NameObject("/StructTreeRoot")] = writer._add_object(DictionaryObject({
-                NameObject("/Type"): NameObject("/StructTreeRoot"),
-                NameObject("/ParentTree"): writer._add_object(DictionaryObject()),
-            }))
-            with source.open("wb") as stream:
-                writer.write(stream)
-
-            report = audit_pdf(source)
-
-        statuses = {item.check_id: item.status for item in report.findings}
-        self.assertEqual(statuses["ACR-DOC-003"], "fail")
-        self.assertEqual(statuses["ACR-PAGE-001"], "fail")
-
-    def test_api_rejects_report_for_different_pdf(self) -> None:
+    def test_audit_page_has_no_external_report_upload(self) -> None:
         with TemporaryDirectory() as folder:
             source = Path(folder) / "source.pdf"
             with source.open("wb") as stream:
                 _image_only_writer().write(stream)
-            report = replace(audit_pdf(source), file="different.pdf")
-            report_path = write_json(report, Path(folder) / "audit.json")
+            report = audit_pdf(source)
+            html_path = write_html(report, Path(folder) / "report.html", "/remediate", "token-value", "/new")
+            document = html_path.read_text(encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "does not match"):
-                remediate_api_payload(source.name, source.read_bytes(), report_path.read_bytes())
+        self.assertIn("Yes, apply remediation", document)
+        self.assertNotIn("Upload remediation JSON file", document)
+        self.assertNotIn("upload-remediation", document)
+        self.assertIn('href="/new">Home</a>', document)
 
-    def test_parses_api_remediation_multipart(self) -> None:
-        boundary = "api-boundary"
+    def test_workflow_and_api_accept_pdf_without_report(self) -> None:
+        boundary = "pdf-boundary"
         body = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.pdf\"\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"pdf\"; filename=\"../sample.pdf\"\r\n"
             "Content-Type: application/pdf\r\n\r\n"
-        ).encode() + b"%PDF-1.7\ncontent\n" + (
-            f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_report\"; filename=\"report.json\"\r\n"
-            "Content-Type: application/json\r\n\r\n"
-            '{"fileName":"source.pdf","remediationReport":"report"}'
-            f"\r\n--{boundary}--\r\n"
-        ).encode()
+        ).encode() + b"%PDF-1.7\ncontent\n" + f"\r\n--{boundary}--\r\n".encode()
+        filename, payload = _parse_pdf_upload(f"multipart/form-data; boundary={boundary}", body)
+        self.assertEqual(filename, "sample.pdf")
+        self.assertEqual(payload, b"%PDF-1.7\ncontent\n")
 
-        filename, pdf, report = _parse_api_remediation_upload(
-            f"multipart/form-data; boundary={boundary}", body
-        )
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "source.pdf"
+            with source.open("wb") as stream:
+                _image_only_writer().write(stream)
+            output_name, output = remediate_api_payload(source.name, source.read_bytes())
 
-        self.assertEqual(filename, "source.pdf")
-        self.assertEqual(pdf, b"%PDF-1.7\ncontent\n")
-        self.assertIn(b'"fileName":"source.pdf"', report)
+        self.assertEqual(output_name, "source_remediated.pdf")
+        self.assertTrue(output.startswith(b"%PDF-"))
+        self.assertEqual(PdfReader(BytesIO(output)).trailer["/Root"]["/Lang"], "en-US")
 
-    def test_api_rejects_duplicate_multipart_fields(self) -> None:
-        boundary = "duplicate-boundary"
-        file_part = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.pdf\"\r\n"
-            "Content-Type: application/pdf\r\n\r\n%PDF-1.7\n"
-        )
-        report_part = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"remediation_report\"\r\n\r\n{{}}\r\n"
-        )
-        body = (file_part + "\r\n" + file_part + "\r\n" + report_part + f"--{boundary}--\r\n").encode()
-
-        with self.assertRaisesRegex(ValueError, "one PDF"):
-            _parse_api_remediation_upload(f"multipart/form-data; boundary={boundary}", body)
-
-    def test_api_key_is_optional_but_enforced_when_configured(self) -> None:
+    def test_api_key_and_attachment_header(self) -> None:
         self.assertTrue(_valid_api_key("", ""))
         self.assertTrue(_valid_api_key("poc-secret", "poc-secret"))
         self.assertFalse(_valid_api_key("poc-secret", "wrong-secret"))
-
-    def test_attachment_header_encodes_untrusted_filename(self) -> None:
         header = _attachment_header('report"\r\nInjected.pdf')
-
         self.assertNotIn("\r", header)
         self.assertNotIn("\n", header)
         self.assertIn("%22%0D%0A", header)

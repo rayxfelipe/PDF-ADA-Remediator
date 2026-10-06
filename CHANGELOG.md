@@ -8,29 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Compare pre-remediation and post-remediation scores using the same local audit implementation, while displaying the input report score separately.
-- Display same-basis local pass, fail, and manual-review counts separately from imported checker counts.
-- Preserve external report evidence notes, source severity labels, WCAG or best-practice distinctions, remediation guidance, and manual verification tasks.
-- Retain additional external findings outside the 32 Acrobat-named rules using stable `EXT-*` identifiers.
+- Make the deterministic PDF audit the sole authority for remediation planning and verification.
+- Accept the source PDF directly in the remediator CLI and PDF-only API.
+- Add schema, checker, and ruleset versions plus source SHA-256 to deterministic audit reports.
+- Add source/output SHA-256 values and verified object-level actions to remediation reports.
 - Treat successful text extraction as insufficient evidence of valid character encoding; object-level or assistive-technology verification is now required.
-- Preserve meaningful existing document titles and enable title display without deriving replacement titles from filenames.
+- Preserve meaningful existing document titles while rejecting generic titles and titles that duplicate the filename.
 - Set structure-based tab order only when the source document has a structure tree that passes local validation.
 - Require a remediation success to show that the same local check changed from a non-passing result before remediation to a pass afterward.
 
 ### Removed
 
+- Remove external audit-report and Markdown-report inputs from remediation.
+- Remove the third-party remediation-report upload and report-driven API contract.
+- Remove imported-checker scoring, evidence, manual queues, and compatibility rule mappings.
 - Removed automatic baseline structure generation that inferred paragraphs, figures, and artifacts from PDF drawing operators.
 
 ### Fixed
 
-- Recognize external report context headers such as `Standards Applied` in both plain-text and bold Markdown formats.
-- Expand external page expressions such as `1-6` and `1, 3-5` into complete page lists.
+- Interpret `/MarkInfo /Marked = false` as false instead of relying on `BooleanObject` truthiness.
+- Do not accept generic metadata such as `PowerPoint Presentation` as a meaningful document title.
 - Reject empty structure trees and marked content without valid structure-element mappings.
-- Match supported legacy finding identifiers to their current Acrobat-aligned checks during outcome reporting.
-- Reject browser and API remediation reports that name a different source PDF.
-- Enforce the exact 5 MiB remediation-report payload limit independently of multipart framing.
-- Return client errors for malformed or mismatched uploaded reports instead of internal-server errors.
 
 ### Security
 
-- Continue processing uploaded source PDFs and reports in temporary storage, without adding customer documents or report payloads to repository history.
+- Continue processing uploaded source PDFs in temporary storage without adding customer documents to repository history.
+- Prevent caller-supplied reports from controlling executable remediation actions.
