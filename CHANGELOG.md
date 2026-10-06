@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Remove external audit-report and Markdown-report inputs from remediation.
 - Remove the third-party remediation-report upload and report-driven API contract.
 - Remove imported-checker scoring, evidence, manual queues, and compatibility rule mappings.
+- Decommission the former AI checker fork deployment, checker-only container images, and checker-exclusive Microsoft Foundry resource group; the deterministic checker/remediator remains independently deployed.
 - Removed automatic baseline structure generation that inferred paragraphs, figures, and artifacts from PDF drawing operators.
 
 ### Fixed
