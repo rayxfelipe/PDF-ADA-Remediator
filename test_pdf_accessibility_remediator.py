@@ -10,6 +10,7 @@ from pypdf.generic import BooleanObject, DecodedStreamObject, DictionaryObject, 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
 from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 from pdf_accessibility_workflow import (
+    UPLOAD_PAGE,
     _attachment_header,
     _parse_pdf_upload,
     _valid_api_key,
@@ -230,6 +231,13 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertNotIn("Upload remediation JSON file", document)
         self.assertNotIn("upload-remediation", document)
         self.assertIn('href="/new">Home</a>', document)
+
+    def test_deployed_workflow_uses_shared_dashboard_ui(self) -> None:
+        self.assertIn("PDF Accessibility Checker and Remediator", UPLOAD_PAGE)
+        self.assertIn('class="dropzone"', UPLOAD_PAGE)
+        self.assertIn("Run Accessibility Audit", UPLOAD_PAGE)
+        self.assertIn("COPY pdf_accessibility_ui.py ./", Path("Dockerfile.azure").read_text(encoding="utf-8"))
+        self.assertIn("!pdf_accessibility_ui.py", Path(".dockerignore").read_text(encoding="utf-8"))
 
     def test_workflow_and_api_accept_pdf_without_report(self) -> None:
         boundary = "pdf-boundary"

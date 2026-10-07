@@ -17,38 +17,44 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from pdf_accessibility_audit import REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, write_html, write_json
 from pdf_accessibility_remediator import RemediationReport, remediate_pdf, write_remediation_html
+from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
-UPLOAD_PAGE = """<!doctype html>
+UPLOAD_PAGE = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF Accessibility Workflow</title>
-<style>
-:root { color-scheme: light; font-family: Georgia, "Times New Roman", serif; color: #16211b; background: #edf1ec; }
-* { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: linear-gradient(135deg, #edf1ec 0 55%, #dce7df 55%); }
-main { width: min(620px, 100%); padding: 40px; border-top: 6px solid #176b4d; background: #fff; box-shadow: 0 18px 50px rgba(22, 33, 27, .14); }
-h1 { margin: 0 0 12px; font-size: clamp(2rem, 8vw, 3.5rem); line-height: 1; }
-p { margin: 0 0 28px; color: #48574f; line-height: 1.6; }
-label { display: block; margin-bottom: 8px; font-weight: 700; }
-input[type=file] { width: 100%; padding: 16px; border: 1px solid #9aaba1; background: #f8faf8; }
-button { margin-top: 20px; padding: 13px 20px; border: 0; background: #176b4d; color: #fff; font: 700 1rem Georgia, serif; cursor: pointer; }
-button:hover { background: #0f523a; }
-</style>
+<title>PDF Accessibility Checker and Remediator</title>
+<style>{APP_STYLES}</style>
 </head>
-<body><main>
-<h1>PDF accessibility check</h1>
-<p>Upload a PDF to audit it. The original is processed temporarily and is not retained. Only a remediated PDF is saved.</p>
-<form method="post" action="/upload-pdf" enctype="multipart/form-data">
-<label for="pdf">PDF file</label>
-<input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
-<button type="submit">Check PDF</button>
-</form>
-</main></body></html>"""
+<body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
+<main id="main-content" class="container">
+<section class="upload-card" aria-labelledby="upload-heading">
+<h2 id="upload-heading">Upload a PDF document</h2>
+<p class="hint">Screen a PDF against the supported accessibility requirements, review the findings, and apply safe automatic remediation. The original is processed temporarily and is not retained.</p>
+<form id="upload" method="post" action="/upload-pdf" enctype="multipart/form-data">
+<div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-hint">
+<input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF file to audit" required>
+<p id="dropzone-hint">Drag &amp; drop a PDF here, or <span class="link-text">browse files</span></p>
+<p id="file-name" class="file-name" aria-live="polite"></p>
+</div>
+<button id="submit" type="submit" disabled>Run Accessibility Audit</button>
+</form></section>
+<section id="status" class="status-card" hidden role="status" aria-live="polite" aria-atomic="true">
+<div class="spinner" aria-hidden="true"></div><div><strong>Auditing document...</strong><p>The findings will appear when the deterministic audit is complete.</p></div>
+</section></main>{app_footer()}
+<script>
+const form=document.getElementById('upload'),dropzone=document.getElementById('dropzone'),input=document.getElementById('pdf'),button=document.getElementById('submit'),fileName=document.getElementById('file-name'),status=document.getElementById('status');
+input.addEventListener('change',event=>{{const file=event.target.files[0];if(file){{fileName.textContent='Selected: '+file.name;button.disabled=false;}}}});
+dropzone.addEventListener('keydown',event=>{{if(event.key==='Enter'||event.key===' '){{event.preventDefault();input.click();}}}});
+['dragenter','dragover'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.add('dragover');}}));
+['dragleave','drop'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.remove('dragover');}}));
+dropzone.addEventListener('drop',event=>{{const file=event.dataTransfer.files[0];if(!file)return;const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;fileName.textContent='Selected: '+file.name;button.disabled=false;}});
+form.addEventListener('submit',()=>{{button.disabled=true;status.hidden=false;}});
+</script></body></html>"""
 
 
 def _safe_upload_name(value: str) -> str:
