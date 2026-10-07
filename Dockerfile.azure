@@ -17,6 +17,7 @@ RUN groupadd --system app \
 
 COPY pdf_accessibility_audit.py ./
 COPY pdf_accessibility_remediator.py ./
+COPY pdf_accessibility_ui.py ./
 COPY pdf_accessibility_workflow.py ./
 RUN chown -R app:app /app
 
