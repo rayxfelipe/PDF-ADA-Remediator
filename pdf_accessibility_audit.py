@@ -15,6 +15,8 @@ from pypdf import PdfReader
 from pypdf.constants import UserAccessPermissions
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, IndirectObject
 
+from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -500,17 +502,17 @@ def write_html(
         rows.append(f"""
         <article class="finding {e(item.status)}" aria-labelledby="{e(item.check_id)}-title">
           <div class="finding-head"><span class="badge">{e(labels[item.status])}</span><span class="severity">{e(item.severity.title())}</span><span class="check-id">{e(item.check_id)}</span></div>
-          <h3 id="{e(item.check_id)}-title">{e(item.requirement)}</h3>
+          <h4 id="{e(item.check_id)}-title">{e(item.requirement)}</h4>
           <p><strong>Source requirement:</strong> {e(item.source_requirement)}</p>
           <p><strong>Result:</strong> {e(item.details + pages)}</p>
           <p><strong>Recommended action:</strong> {e(item.remediation)}</p>
         </article>""")
 
-        remediation_panel = ""
-        if remediation_url:
-            remediation_panel = f"""
-<section class="panel action" aria-labelledby="remediate-heading">
-    <h2 id="remediate-heading">Apply automatic remediation?</h2>
+    remediation_panel = ""
+    if remediation_url:
+        remediation_panel = f"""
+<section id="remediation" class="report-section report-card action" aria-labelledby="remediate-heading">
+    <h3 id="remediate-heading">Apply automatic remediation?</h3>
     <p>A new PDF will be created; the source file will not be changed. Safe language and title-display fixes will be applied when supported by the source document. OCR, alternate-text meaning, semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
     <form method="post" action="{html.escape(remediation_url, quote=True)}" onsubmit="return confirm('Create a remediated copy now? The original will not be overwritten.');">
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
@@ -518,38 +520,34 @@ def write_html(
     </form>
 </section>"""
 
-    home_link = f'<p><a class="home" href="{e(home_url, quote=True)}">Home</a></p>' if home_url else ""
+    home_link = f'<a class="button secondary" href="{e(home_url, quote=True)}">Home</a>' if home_url else ""
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PDF Accessibility Screening Report</title>
-<style>
-:root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--pass:#176b45;--fail:#a12622;--warn:#8a5700;--manual:#5f3b91;--border:#d7dee8}}
-*{{box-sizing:border-box}} body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}
-main{{width:min(1100px,calc(100% - 2rem));margin:2rem auto 4rem}} header,.panel,.finding{{background:var(--paper);border:1px solid var(--border);border-radius:12px;box-shadow:0 3px 14px #1720330d}}
-header{{padding:2rem;border-top:6px solid var(--blue)}} h1{{font-size:clamp(1.8rem,4vw,2.7rem);line-height:1.15;margin:.2rem 0}} h2{{margin-top:2.2rem}} h3{{margin:.6rem 0 .3rem;font-size:1.15rem}}
-.eyebrow,.check-id{{color:var(--muted);font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:.78rem}} .file{{overflow-wrap:anywhere;color:var(--muted)}}
-.score-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:1rem;margin:1.2rem 0}} .metric{{padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:10px}} .metric strong{{display:block;font-size:1.75rem}} .metric span{{color:var(--muted)}}
-.panel{{padding:1.2rem 1.4rem;margin:1.2rem 0}} .notice{{border-left:5px solid var(--warn)}} .finding{{padding:1.1rem 1.3rem;margin:.8rem 0;border-left:6px solid var(--border)}}
-.finding.pass{{border-left-color:var(--pass)}} .finding.fail{{border-left-color:var(--fail)}} .finding.warning{{border-left-color:var(--warn)}} .finding.manual{{border-left-color:var(--manual)}}
-.finding-head{{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}} .badge,.severity{{display:inline-block;border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800}} .badge{{background:#e8edf4}} .pass .badge{{background:#d9f3e7;color:#0f5a39}} .fail .badge{{background:#fde3e1;color:#841d19}} .warning .badge{{background:#fff0cb;color:#724700}} .manual .badge{{background:#eee4fa;color:#503078}} .severity{{border:1px solid var(--border)}}
-p{{margin:.38rem 0}} a{{color:var(--blue)}} .home{{display:inline-block;padding:.65rem 1rem;border:1px solid var(--blue);border-radius:8px;font-weight:750;text-decoration:none}} button{{margin-top:1rem;padding:.75rem 1.15rem;border:0;border-radius:8px;background:var(--blue);color:#fff;font:inherit;font-weight:750;cursor:pointer}} button:hover{{background:#0d417d}} button:focus-visible,.home:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}} .action{{border-left:5px solid var(--blue)}} footer{{color:var(--muted);margin-top:2rem}} @media print{{body{{background:#fff}}main{{width:100%;margin:0}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}.action,.home{{display:none}}}}
-</style>
+<style>{APP_STYLES}</style>
 </head>
-<body><main>
-{home_link}
-<header><div class="eyebrow">Automated accessibility screening</div><h1>PDF Accessibility Report</h1><p class="file">{e(report.file)}</p>
-<div class="score-grid">
-<div class="metric"><strong>{report.score}/100</strong><span>Automated score</span></div><div class="metric"><strong>{report.page_count}</strong><span>Pages</span></div>
-<div class="metric"><strong>{report.summary['fail']}</strong><span>Failures</span></div><div class="metric"><strong>{report.summary['warning']}</strong><span>Warnings</span></div><div class="metric"><strong>{report.summary['manual']}</strong><span>Manual checks</span></div>
-</div><p><strong>{e(report.rating)}</strong></p></header>
-<section class="panel notice" aria-labelledby="limitations"><h2 id="limitations">Scope and limitations</h2><p>{e(report.disclaimer)}</p></section>
-<section class="panel" aria-labelledby="basis"><h2 id="basis">Evaluation basis</h2><ul>{''.join(f'<li>{e(item)}</li>' for item in report.standard_basis)}</ul><p>Checker {e(report.checker_version)}; ruleset {e(report.ruleset_version)}; source SHA-256 <code>{e(report.source_sha256)}</code>.</p><p>Generated {e(report.generated_at)}</p></section>
+<body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
+<main id="main-content" class="container"><article class="audit-dashboard">
+<header class="report-hero"><p class="report-eyebrow">PDF accessibility audit</p><h2>Audit dashboard</h2><p class="file">File: <strong>{e(report.file)}</strong></p></header>
+<nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
+<div class="report-content">
+<section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>
+<div class="report-kpis">
+<div class="report-card report-kpi"><strong>{report.score}/100</strong><span>Automated score</span></div>
+<div class="report-card report-kpi"><strong>{report.page_count}</strong><span>Pages</span></div>
+<div class="report-card report-kpi fail"><strong>{report.summary['fail']}</strong><span>Failures</span></div>
+<div class="report-card report-kpi warning"><strong>{report.summary['warning']}</strong><span>Warnings</span></div>
+<div class="report-card report-kpi manual"><strong>{report.summary['manual']}</strong><span>Manual checks</span></div>
+</div><p class="report-card"><strong>{e(report.rating)}</strong></p></section>
 {remediation_panel}
-<section aria-labelledby="findings"><h2 id="findings">Detailed findings</h2>{''.join(rows)}</section>
-<footer><p>Prioritize failed critical and high-severity findings, then complete every manual review with assistive technology.</p></footer>
-</main></body></html>"""
+<section id="evaluation" class="report-section" aria-labelledby="evaluation-heading"><h3 id="evaluation-heading">Evaluation basis</h3>
+<div class="report-card"><ul>{''.join(f'<li>{e(item)}</li>' for item in report.standard_basis)}</ul><dl class="metadata"><div><dt>Checker and ruleset</dt><dd>{e(report.checker_version)} / {e(report.ruleset_version)}</dd></div><div><dt>Source SHA-256</dt><dd><code>{e(report.source_sha256)}</code></dd></div><div><dt>Generated</dt><dd>{e(report.generated_at)}</dd></div></dl></div></section>
+<section class="report-section" aria-labelledby="limitations"><h3 id="limitations">Scope and limitations</h3><div class="report-card notice"><p>{e(report.disclaimer)}</p></div></section>
+<section id="findings" class="report-section" aria-labelledby="findings-heading"><h3 id="findings-heading">Detailed findings</h3><div class="report-grid">{''.join(rows)}</div></section>
+<div class="report-actions">{home_link}<button type="button" onclick="window.print()">Print or save as PDF</button></div>
+</div></article></main>{app_footer()}</body></html>"""
     path.write_text(html_doc, encoding="utf-8")
     return path
 

@@ -20,6 +20,7 @@ from pdf_accessibility_audit import (
     audit_pdf,
     is_meaningful_title,
 )
+from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
 
 @dataclass(frozen=True)
@@ -265,7 +266,7 @@ def write_remediation_html(
         "not_applicable": "N/A or skipped",
     }
     rows = "".join(
-        f"""<article class="finding {e(item.status)}"><div class="finding-head"><span class="badge">{e(labels[item.status])}</span><span class="check-id">{e(item.check_id)}</span></div><h3>{e(item.requirement)}</h3><p><strong>Source requirement:</strong> {e(item.source_requirement)}</p><p>{e(item.details)}</p></article>"""
+        f"""<article class="finding {e(item.status)}"><div class="finding-head"><span class="badge">{e(labels[item.status])}</span><span class="check-id">{e(item.check_id)}</span></div><h4>{e(item.requirement)}</h4><p><strong>Source requirement:</strong> {e(item.source_requirement)}</p><p>{e(item.details)}</p></article>"""
         for item in report.items
     )
     action_rows = "".join(
@@ -273,9 +274,29 @@ def write_remediation_html(
         for item in report.actions
     ) or "<li>No safe automatic changes were available.</li>"
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
-    home = f'<p><a class="button secondary" href="{e(home_url, quote=True)}">Home</a></p>' if home_url else ""
-    document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Remediation Results</title><style>
-:root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--pass:#176b45;--fail:#a12622;--manual:#5f3b91;--border:#d7dee8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}main{{width:min(1000px,calc(100% - 2rem));margin:2rem auto 4rem}}header,.panel,.finding{{background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 3px 14px #1720330d;padding:1.3rem}}header{{border-top:6px solid var(--blue)}}h1{{line-height:1.15}}.file,code{{overflow-wrap:anywhere;color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:1rem;margin:1rem 0}}.metric{{padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:10px}}.metric strong{{display:block;font-size:1.7rem}}.finding{{margin:.8rem 0;border-left:6px solid var(--border)}}.finding.success{{border-left-color:var(--pass)}}.finding.failed{{border-left-color:var(--fail)}}.finding.manual{{border-left-color:var(--manual)}}.finding-head{{display:flex;gap:.6rem;align-items:center}}.badge{{border-radius:999px;padding:.17rem .62rem;font-size:.78rem;font-weight:800;background:#e8edf4}}.success .badge{{background:#d9f3e7;color:#0f5a39}}.failed .badge{{background:#fde3e1;color:#841d19}}.manual .badge{{background:#eee4fa;color:#503078}}.check-id{{color:var(--muted);font-weight:700;font-size:.78rem}}.button{{display:inline-block;padding:.75rem 1.15rem;border-radius:8px;background:var(--blue);color:#fff;font-weight:750;text-decoration:none}}.secondary{{background:#44546a}}@media print{{body{{background:#fff}}header,.panel,.finding{{box-shadow:none;break-inside:avoid}}}}</style></head><body><main>{home}<header><p>Deterministic remediation complete</p><h1>PDF Remediation Results</h1><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p><div class="grid"><div class="metric"><strong>{report.before_score} → {report.after_score}</strong><span>Score</span></div><div class="metric"><strong>{report.before_summary.get('pass', 0)} → {report.after_summary.get('pass', 0)}</strong><span>Passed</span></div><div class="metric"><strong>{report.before_summary.get('fail', 0)} → {report.after_summary.get('fail', 0)}</strong><span>Failed</span></div><div class="metric"><strong>{report.manual_review}</strong><span>Manual checks</span></div></div>{download}</header><section class="panel"><h2>Verification identity</h2><p>Checker {e(report.checker_version)}; ruleset {e(report.ruleset_version)}.</p><p><strong>Source SHA-256:</strong> <code>{e(report.source_sha256)}</code></p><p><strong>Output SHA-256:</strong> <code>{e(report.output_sha256)}</code></p></section><section class="panel"><h2>Verified actions</h2><ul>{action_rows}</ul></section><section class="panel"><h2>Scope and limitations</h2><p>{e(DISCLAIMER)}</p></section><section><h2>Remediation outcomes</h2>{rows}</section></main></body></html>"""
+    home = f'<a class="button secondary" href="{e(home_url, quote=True)}">Home</a>' if home_url else ""
+    document = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF Remediation Results</title><style>{APP_STYLES}</style></head>
+<body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
+<main id="main-content" class="container"><article class="audit-dashboard">
+<header class="report-hero"><p class="report-eyebrow">Deterministic remediation complete</p><h2>Remediation dashboard</h2><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p></header>
+<nav class="report-nav" aria-label="Remediation report sections"><a href="#overview">Overview</a><a href="#actions">Verified actions</a><a href="#verification">Verification</a><a href="#outcomes">Outcomes</a></nav>
+<div class="report-content">
+<section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>
+<div class="report-kpis">
+<div class="report-card report-kpi"><strong>{report.before_score} → {report.after_score}</strong><span>Score</span></div>
+<div class="report-card report-kpi pass"><strong>{report.before_summary.get('pass', 0)} → {report.after_summary.get('pass', 0)}</strong><span>Passed</span></div>
+<div class="report-card report-kpi fail"><strong>{report.before_summary.get('fail', 0)} → {report.after_summary.get('fail', 0)}</strong><span>Failed</span></div>
+<div class="report-card report-kpi manual"><strong>{report.manual_review}</strong><span>Manual checks</span></div>
+</div></section>
+<section id="actions" class="report-section" aria-labelledby="actions-heading"><h3 id="actions-heading">Verified actions</h3><div class="report-card action"><ul>{action_rows}</ul></div></section>
+<section id="verification" class="report-section" aria-labelledby="verification-heading"><h3 id="verification-heading">Verification identity</h3>
+<div class="report-card"><dl class="metadata"><div><dt>Checker and ruleset</dt><dd>{e(report.checker_version)} / {e(report.ruleset_version)}</dd></div><div><dt>Source SHA-256</dt><dd><code>{e(report.source_sha256)}</code></dd></div><div><dt>Output SHA-256</dt><dd><code>{e(report.output_sha256)}</code></dd></div></dl></div></section>
+<section class="report-section" aria-labelledby="limitations-heading"><h3 id="limitations-heading">Scope and limitations</h3><div class="report-card notice"><p>{e(DISCLAIMER)}</p></div></section>
+<section id="outcomes" class="report-section" aria-labelledby="outcomes-heading"><h3 id="outcomes-heading">Remediation outcomes</h3><div class="report-grid">{rows}</div></section>
+<div class="report-actions">{download}{home}<button type="button" onclick="window.print()">Print or save as PDF</button></div>
+</div></article></main>{app_footer()}</body></html>"""
     path.write_text(document, encoding="utf-8")
     return path
 

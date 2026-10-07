@@ -13,6 +13,7 @@ import azure.functions as func
 
 from pdf_accessibility_audit import audit_pdf, write_html
 from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
+from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -100,11 +101,50 @@ def _route_url(req: func.HttpRequest, action: str, **params: str) -> str:
 
 def _upload_page(req: func.HttpRequest) -> func.HttpResponse:
     action_url = _route_url(req, "", code=_function_code(req))
-    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PDF Accessibility Audit</title><style>:root{{--ink:#172033;--muted:#596579;--paper:#fff;--canvas:#f3f6fa;--blue:#1456a0;--border:#d7dee8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}main{{width:min(760px,calc(100% - 2rem));margin:4rem auto}}section{{background:#fff;border:1px solid var(--border);border-top:6px solid var(--blue);border-radius:12px;padding:2rem;box-shadow:0 3px 14px #1720330d}}h1{{line-height:1.15}}p{{color:var(--muted)}}label{{display:block;font-weight:750;margin:1.5rem 0 .4rem}}input[type=file]{{width:100%;padding:1rem;border:2px dashed var(--border);border-radius:8px;background:#f8fafc}}button{{margin-top:1.3rem;padding:.8rem 1.2rem;border:0;border-radius:8px;background:var(--blue);color:#fff;font:inherit;font-weight:750;cursor:pointer}}button:disabled{{opacity:.55;cursor:wait}}button:focus-visible,input:focus-visible{{outline:3px solid #f5b942;outline-offset:3px}}#status{{min-height:1.5rem}}</style></head>
-<body><main><section><h1>PDF Accessibility Audit</h1><p>Upload a PDF to screen it against the requirements derived from ADA Title II Web Accessibility.docx. Maximum size: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.</p>
-<form id="upload"><label for="pdf">PDF file</label><input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required><button id="submit" type="submit">Evaluate PDF</button><p id="status" role="status" aria-live="polite"></p></form></section></main>
-<script>const form=document.getElementById('upload'),button=document.getElementById('submit'),status=document.getElementById('status');form.addEventListener('submit',async(e)=>{{e.preventDefault();const file=document.getElementById('pdf').files[0];if(!file)return;button.disabled=true;status.textContent='Uploading and evaluating…';try{{const response=await fetch({action_url!r},{{method:'POST',headers:{{'Content-Type':'application/pdf','X-PDF-Filename':encodeURIComponent(file.name)}},body:file}});const body=await response.text();if(!response.ok)throw new Error(body);document.open();document.write(body);document.close();}}catch(error){{status.textContent='Evaluation failed: '+error.message;button.disabled=false;}}}});</script></body></html>"""
+    max_megabytes = MAX_UPLOAD_BYTES // (1024 * 1024)
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF Accessibility Checker and Remediator</title><style>{APP_STYLES}</style></head>
+<body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
+<main id="main-content" class="container">
+<section class="upload-card" aria-labelledby="upload-heading">
+<h2 id="upload-heading">Upload a PDF document</h2>
+<p class="hint">Screen a PDF against the supported accessibility requirements, review the findings, and apply safe automatic remediation. Maximum size: {max_megabytes} MB.</p>
+<form id="upload" novalidate>
+<div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-hint">
+<input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF file to audit">
+<p id="dropzone-hint">Drag &amp; drop a PDF here, or <span class="link-text">browse files</span></p>
+<p id="file-name" class="file-name" aria-live="polite"></p>
+</div>
+<button id="submit" type="submit" disabled>Run Accessibility Audit</button>
+<p id="error" class="error-message" role="alert" hidden></p>
+</form></section>
+<section id="status" class="status-card" hidden role="status" aria-live="polite" aria-atomic="true">
+<div class="spinner" aria-hidden="true"></div><div><strong>Auditing document...</strong><p>The findings will appear when the deterministic audit is complete.</p></div>
+</section></main>{app_footer()}
+<script>
+const form=document.getElementById('upload'),dropzone=document.getElementById('dropzone'),input=document.getElementById('pdf'),button=document.getElementById('submit'),fileName=document.getElementById('file-name'),status=document.getElementById('status'),error=document.getElementById('error');
+let selectedFile=null;
+function showError(message){{error.textContent=message;error.hidden=false;}}
+function selectFile(file){{
+  if(!file)return;
+  if(file.type!=='application/pdf'&&!file.name.toLowerCase().endsWith('.pdf')){{showError('Only PDF files are supported.');return;}}
+  if(file.size>{MAX_UPLOAD_BYTES}){{showError('File exceeds the {max_megabytes} MB size limit.');return;}}
+  error.hidden=true;selectedFile=file;fileName.textContent='Selected: '+file.name;button.disabled=false;
+}}
+input.addEventListener('change',event=>selectFile(event.target.files[0]));
+dropzone.addEventListener('keydown',event=>{{if(event.key==='Enter'||event.key===' '){{event.preventDefault();input.click();}}}});
+['dragenter','dragover'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.add('dragover');}}));
+['dragleave','drop'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.remove('dragover');}}));
+dropzone.addEventListener('drop',event=>selectFile(event.dataTransfer.files[0]));
+form.addEventListener('submit',async event=>{{
+  event.preventDefault();if(!selectedFile)return;button.disabled=true;status.hidden=false;error.hidden=true;
+  try{{
+    const response=await fetch({action_url!r},{{method:'POST',headers:{{'Content-Type':'application/pdf','X-PDF-Filename':encodeURIComponent(selectedFile.name)}},body:selectedFile}});
+    const body=await response.text();if(!response.ok)throw new Error(body);document.open();document.write(body);document.close();
+  }}catch(reason){{showError('Evaluation failed: '+reason.message);status.hidden=true;button.disabled=false;}}
+}});
+</script></body></html>"""
     return func.HttpResponse(page, mimetype="text/html", status_code=200)
 
 

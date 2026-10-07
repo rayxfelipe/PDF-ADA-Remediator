@@ -208,6 +208,8 @@ class AccessibilityRemediationTests(unittest.TestCase):
             document = report_path.read_text(encoding="utf-8")
 
         self.assertIn("Deterministic remediation complete", document)
+        self.assertIn("Remediation dashboard", document)
+        self.assertIn('class="report-nav"', document)
         self.assertIn("Source SHA-256", document)
         self.assertIn("Verified actions", document)
         self.assertNotIn("Imported checker", document)
@@ -223,6 +225,8 @@ class AccessibilityRemediationTests(unittest.TestCase):
             document = html_path.read_text(encoding="utf-8")
 
         self.assertIn("Yes, apply remediation", document)
+        self.assertIn("Audit dashboard", document)
+        self.assertIn('class="report-nav"', document)
         self.assertNotIn("Upload remediation JSON file", document)
         self.assertNotIn("upload-remediation", document)
         self.assertIn('href="/new">Home</a>', document)
