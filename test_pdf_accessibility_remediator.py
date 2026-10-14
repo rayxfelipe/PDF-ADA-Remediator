@@ -8,6 +8,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
 from pdf_accessibility_audit import ACROBAT_RULE_IDS, audit_pdf, read_json, write_html, write_json
+from pdf_accessibility_policy import WCAG_21_AA_CRITERIA
 from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 from pdf_accessibility_workflow import (
     UPLOAD_PAGE,
@@ -72,13 +73,16 @@ class AccessibilityRemediationTests(unittest.TestCase):
             first = audit_pdf(source)
             second = audit_pdf(source)
 
-        self.assertEqual(first.schema_version, 3)
-        self.assertEqual(first.checker_version, "2.0.0")
-        self.assertEqual(first.ruleset_version, "2026.10")
+        self.assertEqual(first.schema_version, 4)
+        self.assertEqual(first.checker_version, "2.1.0")
+        self.assertEqual(first.ruleset_version, "2026.10.1")
         self.assertEqual(first.source_sha256, second.source_sha256)
         self.assertEqual(first.summary, second.summary)
         self.assertEqual(first.findings, second.findings)
         self.assertEqual(tuple(item.check_id for item in first.findings), ACROBAT_RULE_IDS)
+        self.assertEqual(len(first.wcag_results), len(WCAG_21_AA_CRITERIA))
+        self.assertEqual(len(first.wcag_results), 50)
+        self.assertIn("Incomplete", first.wcag_determination)
 
     def test_audit_json_only_loads_local_structured_contract(self) -> None:
         with TemporaryDirectory() as folder:
@@ -117,6 +121,10 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(action.result, "verified")
         language = next(item for item in result.items if item.check_id == "ACR-DOC-005")
         self.assertEqual(language.status, "success")
+        wcag_language = next(item for item in result.wcag_results if item.criterion == "3.1.1")
+        self.assertEqual(wcag_language.before_status, "fail")
+        self.assertEqual(wcag_language.after_status, "pass")
+        self.assertEqual(wcag_language.completion, "automatically_remediated")
 
     def test_preserves_meaningful_title_and_enables_title_display(self) -> None:
         with TemporaryDirectory() as folder:
@@ -208,9 +216,14 @@ class AccessibilityRemediationTests(unittest.TestCase):
             report_path = write_remediation_html(result, root / "result.html")
             document = report_path.read_text(encoding="utf-8")
 
-        self.assertIn("Deterministic remediation complete", document)
+        self.assertIn("Deterministic remediation run complete", document)
         self.assertIn("Remediation dashboard", document)
         self.assertIn('class="report-nav"', document)
+        self.assertIn("WCAG 2.1 Level AA remediation matrix", document)
+        self.assertIn("Audit and remediation checkpoints", document)
+        self.assertIn("Automated accessibility score", document)
+        self.assertIn("Automatically remediated and verified", document)
+        self.assertIn("Not tested by this application", document)
         self.assertIn("Source SHA-256", document)
         self.assertIn("Verified actions", document)
         self.assertNotIn("Imported checker", document)
@@ -228,6 +241,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("Yes, apply remediation", document)
         self.assertIn("Audit dashboard", document)
         self.assertIn('class="report-nav"', document)
+        self.assertIn("WCAG 2.1 Level AA coverage", document)
+        self.assertIn("WCAG conformance determination", document)
+        self.assertIn("Automated accessibility score", document)
         self.assertNotIn("Upload remediation JSON file", document)
         self.assertNotIn("upload-remediation", document)
         self.assertIn('href="/new">Home</a>', document)

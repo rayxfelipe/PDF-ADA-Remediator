@@ -15,6 +15,14 @@ from pypdf import PdfReader
 from pypdf.constants import UserAccessPermissions
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, IndirectObject
 
+from pdf_accessibility_policy import (
+    WCAG_STANDARD,
+    WCAG_STATUS_LABELS,
+    WcagResult,
+    build_wcag_results,
+    summarize_wcag,
+    wcag_determination,
+)
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
 
@@ -46,12 +54,16 @@ class AuditReport:
     disclaimer: str
     summary: dict[str, int]
     findings: list[Finding]
+    wcag_standard: str
+    wcag_determination: str
+    wcag_summary: dict[str, int]
+    wcag_results: list[WcagResult]
 
 
 WEIGHTS = {"critical": 10, "high": 7, "medium": 4, "low": 1}
-AUDIT_SCHEMA_VERSION = 3
-CHECKER_VERSION = "2.0.0"
-RULESET_VERSION = "2026.10"
+AUDIT_SCHEMA_VERSION = 4
+CHECKER_VERSION = "2.1.0"
+RULESET_VERSION = "2026.10.1"
 ACROBAT_RULE_IDS = (
     "ACR-DOC-001", "ACR-DOC-002", "ACR-DOC-003", "ACR-DOC-004",
     "ACR-DOC-005", "ACR-DOC-006", "ACR-DOC-007", "ACR-DOC-008",
@@ -433,6 +445,8 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     score = _calculate_score(findings)
     rating = "Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected"
     summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "skipped", "not_applicable")}
+    wcag_results = build_wcag_results(findings)
+    wcag_summary = summarize_wcag(wcag_results)
     return AuditReport(
         schema_version=AUDIT_SCHEMA_VERSION,
         checker_version=CHECKER_VERSION,
@@ -454,6 +468,10 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         disclaimer=DISCLAIMER,
         summary=summary,
         findings=findings,
+        wcag_standard=WCAG_STANDARD,
+        wcag_determination=wcag_determination(wcag_summary),
+        wcag_summary=wcag_summary,
+        wcag_results=wcag_results,
     )
 
 
@@ -480,7 +498,11 @@ def read_json(input_path: str | Path) -> AuditReport:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         findings = [Finding(**item) for item in data.pop("findings")]
-        return AuditReport(findings=findings, **data)
+        wcag_results = [
+            WcagResult(**{**item, "check_ids": tuple(item["check_ids"])})
+            for item in data.pop("wcag_results")
+        ]
+        return AuditReport(findings=findings, wcag_results=wcag_results, **data)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Invalid audit JSON report: {path}") from exc
 
@@ -496,6 +518,10 @@ def write_html(
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
     labels = {"pass": "Pass", "fail": "Fail", "warning": "Warning", "manual": "Manual review", "skipped": "Skipped", "not_applicable": "N/A"}
+    wcag_rows = "".join(
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td>{e(item.applicability.replace('_', ' ').title())}</td><td>{e(item.test_method)}</td><td><span class="result-label result-{e(item.status)}">{e(WCAG_STATUS_LABELS[item.status])}</span></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        for item in report.wcag_results
+    )
     rows = []
     for item in report.findings:
         pages = f" Pages: {', '.join(map(str, item.pages))}." if item.pages else ""
@@ -531,16 +557,26 @@ def write_html(
 <body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
 <main id="main-content" class="container"><article class="audit-dashboard">
 <header class="report-hero"><p class="report-eyebrow">PDF accessibility audit</p><h2>Audit dashboard</h2><p class="file">File: <strong>{e(report.file)}</strong></p></header>
-<nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
+<nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#wcag">WCAG coverage</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
 <div class="report-content">
 <section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>
 <div class="report-kpis">
-<div class="report-card report-kpi"><strong>{report.score}/100</strong><span>Automated score</span></div>
+<div class="report-card report-kpi"><strong>{report.score}/100</strong><span>Automated accessibility score</span></div>
 <div class="report-card report-kpi"><strong>{report.page_count}</strong><span>Pages</span></div>
 <div class="report-card report-kpi fail"><strong>{report.summary['fail']}</strong><span>Failures</span></div>
 <div class="report-card report-kpi warning"><strong>{report.summary['warning']}</strong><span>Warnings</span></div>
 <div class="report-card report-kpi manual"><strong>{report.summary['manual']}</strong><span>Manual checks</span></div>
-</div><p class="report-card"><strong>{e(report.rating)}</strong></p></section>
+</div><div class="report-card status-banner"><strong>WCAG conformance determination</strong>{e(report.wcag_determination)}. Automated results do not establish WCAG conformance without the required manual and assistive-technology review.</div></section>
+<section id="wcag" class="report-section" aria-labelledby="wcag-heading"><h3 id="wcag-heading">{e(report.wcag_standard)} coverage</h3>
+<div class="report-kpis">
+<div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
+<div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('manual', 0)}</strong><span>Manual verification</span></div>
+<div class="report-card report-kpi warning"><strong>{report.wcag_summary.get('not_tested', 0)}</strong><span>Not tested</span></div>
+<div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
+</div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Applicability</th><th scope="col">Test method</th><th scope="col">Audit result</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+</section>
 {remediation_panel}
 <section id="evaluation" class="report-section" aria-labelledby="evaluation-heading"><h3 id="evaluation-heading">Evaluation basis</h3>
 <div class="report-card"><ul>{''.join(f'<li>{e(item)}</li>' for item in report.standard_basis)}</ul><dl class="metadata"><div><dt>Checker and ruleset</dt><dd>{e(report.checker_version)} / {e(report.ruleset_version)}</dd></div><div><dt>Source SHA-256</dt><dd><code>{e(report.source_sha256)}</code></dd></div><div><dt>Generated</dt><dd>{e(report.generated_at)}</dd></div></dl></div></section>

@@ -129,6 +129,25 @@ button:disabled { background: #9aa3ad; cursor: not-allowed; }
 .metadata > div + div { margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--color-border); }
 .metadata dt { color: #334e68; font-weight: 750; }
 .metadata dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.status-banner { padding: 1rem 1.2rem; border-left: 6px solid var(--color-warning); }
+.status-banner strong { display: block; margin-bottom: .25rem; }
+.policy-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.policy-table th, .policy-table td { padding: .65rem .7rem; text-align: left; vertical-align: top; border: 1px solid var(--color-border); }
+.policy-table th { color: #fff; background: #244761; }
+.policy-table tbody tr:nth-child(even) { background: #f7f9fc; }
+.policy-table code { font-size: .82rem; }
+.result-label { display: inline-block; padding: .16rem .5rem; border-radius: 999px; font-size: .74rem; font-weight: 800; }
+.result-pass, .result-automatically_remediated, .result-already_passed, .result-verified_pass { color: #0f5a39; background: #d9f3e7; }
+.result-fail, .result-not_remediated { color: #841d19; background: #fde3e1; }
+.result-manual, .result-manual_review { color: #503078; background: #eee4fa; }
+.result-not_tested { color: #674c00; background: #fff0cb; }
+.result-not_applicable { color: #44546a; background: #e8edf4; }
+.checkpoint-list { margin: 0; padding: 0; list-style: none; }
+.checkpoint-list li { display: grid; grid-template-columns: minmax(170px, .65fr) minmax(110px, .35fr) minmax(260px, 1fr); gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--color-border); }
+.checkpoint-list li:first-child { border-top: 0; }
+.checkpoint-list li > * { min-width: 0; overflow-wrap: anywhere; }
+.checkpoint-stage { font-weight: 750; }
+.checkpoint-status { font-weight: 750; color: var(--color-primary); }
 .report-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
 .app-footer { padding: 1.5rem 0; color: var(--color-muted); background: #fff; border-top: 1px solid var(--color-border); }
 .app-footer p { margin: 0; }
@@ -136,6 +155,8 @@ button:disabled { background: #9aa3ad; cursor: not-allowed; }
   .container { width: min(100% - 2rem, 1120px); }
   .report-grid { grid-template-columns: 1fr; }
   .report-content { padding: 1.25rem; }
+  .policy-table { display: block; overflow-x: auto; }
+  .checkpoint-list li { grid-template-columns: 1fr; gap: .2rem; }
 }
 @media print {
   body { background: #fff; }

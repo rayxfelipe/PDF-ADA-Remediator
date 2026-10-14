@@ -38,6 +38,13 @@ Every remediation report includes:
 - Planned and verified actions
 - Rule-level outcomes
 - Items requiring human review
+- A complete WCAG 2.1 Level A/AA coverage matrix
+- Explicit mappings from WCAG criteria to deterministic application checks
+- Pre- and post-remediation checkpoints
+- Separate automatic, manual, unsupported, and not-applicable states
+- A conformance determination indicator that remains incomplete while failures, manual review, or unsupported criteria remain
+
+The numerical result is labeled an **automated accessibility score**. It measures the deterministic checks implemented by this application and must not be interpreted as a WCAG compliance percentage.
 
 ## Scope
 

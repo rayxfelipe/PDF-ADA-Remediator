@@ -20,6 +20,14 @@ from pdf_accessibility_audit import (
     audit_pdf,
     is_meaningful_title,
 )
+from pdf_accessibility_policy import (
+    WCAG_COMPLETION_LABELS,
+    WCAG_STATUS_LABELS,
+    WcagComparison,
+    compare_wcag,
+    summarize_wcag,
+    wcag_determination,
+)
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
 
@@ -62,6 +70,10 @@ class RemediationReport:
     actions: list[RemediationAction]
     items: list[RemediationItem]
     after_audit: AuditReport
+    wcag_determination: str
+    wcag_summary: dict[str, int]
+    wcag_results: list[WcagComparison]
+    checkpoints: list[dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -227,8 +239,19 @@ def remediate_pdf(
     ]
     items = _remediation_items(before, after)
     output_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+    wcag_results = compare_wcag(before.wcag_results, after.wcag_results)
+    wcag_summary = summarize_wcag(after.wcag_results)
+    determination = wcag_determination(wcag_summary)
+    checkpoints = [
+        {"stage": "Source received", "status": "Complete", "details": f"SHA-256 {source_sha256}"},
+        {"stage": "Pre-remediation audit", "status": "Complete", "details": f"{before.summary.get('fail', 0)} deterministic failures; {before.summary.get('manual', 0)} manual checks"},
+        {"stage": "Automatic remediation", "status": "Complete", "details": f"{len(actions)} safe action(s) applied and verified"},
+        {"stage": "Post-remediation audit", "status": "Complete", "details": f"SHA-256 {output_sha256}; {after.summary.get('fail', 0)} deterministic failures remain"},
+        {"stage": "Manual WCAG review", "status": "Pending" if wcag_summary.get("manual", 0) or wcag_summary.get("not_tested", 0) else "Not required", "details": f"{wcag_summary.get('manual', 0)} manual and {wcag_summary.get('not_tested', 0)} untested criteria"},
+        {"stage": "WCAG 2.1 AA determination", "status": "Incomplete" if determination.startswith("Incomplete") else "Ready for review", "details": determination},
+    ]
     return RemediationReport(
-        schema_version=3,
+        schema_version=4,
         source_file=str(source),
         source_sha256=source_sha256,
         remediated_file=str(destination),
@@ -246,6 +269,10 @@ def remediate_pdf(
         actions=actions,
         items=items,
         after_audit=after,
+        wcag_determination=determination,
+        wcag_summary=wcag_summary,
+        wcag_results=wcag_results,
+        checkpoints=checkpoints,
     )
 
 
@@ -273,6 +300,14 @@ def write_remediation_html(
         f"<li><strong>{e(item.action_id)}</strong>: {e(item.target)} changed from {e(item.before or 'not set')} to {e(item.after)} — {e(item.result)}.</li>"
         for item in report.actions
     ) or "<li>No safe automatic changes were available.</li>"
+    checkpoint_rows = "".join(
+        f"""<li><span class="checkpoint-stage">{e(item['stage'])}</span><span class="checkpoint-status">{e(item['status'])}</span><span>{e(item['details'])}</span></li>"""
+        for item in report.checkpoints
+    )
+    wcag_rows = "".join(
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.test_method)}</td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        for item in report.wcag_results
+    )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
     home = f'<a class="button secondary" href="{e(home_url, quote=True)}">Home</a>' if home_url else ""
     document = f"""<!doctype html>
@@ -280,16 +315,27 @@ def write_remediation_html(
 <title>PDF Remediation Results</title><style>{APP_STYLES}</style></head>
 <body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
 <main id="main-content" class="container"><article class="audit-dashboard">
-<header class="report-hero"><p class="report-eyebrow">Deterministic remediation complete</p><h2>Remediation dashboard</h2><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p></header>
-<nav class="report-nav" aria-label="Remediation report sections"><a href="#overview">Overview</a><a href="#actions">Verified actions</a><a href="#verification">Verification</a><a href="#outcomes">Outcomes</a></nav>
+<header class="report-hero"><p class="report-eyebrow">Deterministic remediation run complete</p><h2>Remediation dashboard</h2><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p></header>
+<nav class="report-nav" aria-label="Remediation report sections"><a href="#overview">Overview</a><a href="#checkpoints">Checkpoints</a><a href="#wcag">WCAG results</a><a href="#actions">Verified actions</a><a href="#verification">Verification</a><a href="#outcomes">Detailed outcomes</a></nav>
 <div class="report-content">
 <section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>
 <div class="report-kpis">
-<div class="report-card report-kpi"><strong>{report.before_score} → {report.after_score}</strong><span>Score</span></div>
+<div class="report-card report-kpi"><strong>{report.before_score} → {report.after_score}</strong><span>Automated accessibility score</span></div>
 <div class="report-card report-kpi pass"><strong>{report.before_summary.get('pass', 0)} → {report.after_summary.get('pass', 0)}</strong><span>Passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.before_summary.get('fail', 0)} → {report.after_summary.get('fail', 0)}</strong><span>Failed</span></div>
 <div class="report-card report-kpi manual"><strong>{report.manual_review}</strong><span>Manual checks</span></div>
-</div></section>
+</div><div class="report-card status-banner"><strong>WCAG conformance determination</strong>{e(report.wcag_determination)}. “Automatic remediation complete” does not mean the PDF conforms to WCAG 2.1 Level AA.</div></section>
+<section id="checkpoints" class="report-section" aria-labelledby="checkpoints-heading"><h3 id="checkpoints-heading">Audit and remediation checkpoints</h3><div class="report-card"><ul class="checkpoint-list">{checkpoint_rows}</ul></div></section>
+<section id="wcag" class="report-section" aria-labelledby="wcag-heading"><h3 id="wcag-heading">WCAG 2.1 Level AA remediation matrix</h3>
+<div class="report-kpis">
+<div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
+<div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('manual', 0)}</strong><span>Manual verification</span></div>
+<div class="report-card report-kpi warning"><strong>{report.wcag_summary.get('not_tested', 0)}</strong><span>Not tested</span></div>
+<div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
+</div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Completion</th><th scope="col">Test method</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+</section>
 <section id="actions" class="report-section" aria-labelledby="actions-heading"><h3 id="actions-heading">Verified actions</h3><div class="report-card action"><ul>{action_rows}</ul></div></section>
 <section id="verification" class="report-section" aria-labelledby="verification-heading"><h3 id="verification-heading">Verification identity</h3>
 <div class="report-card"><dl class="metadata"><div><dt>Checker and ruleset</dt><dd>{e(report.checker_version)} / {e(report.ruleset_version)}</dd></div><div><dt>Source SHA-256</dt><dd><code>{e(report.source_sha256)}</code></dd></div><div><dt>Output SHA-256</dt><dd><code>{e(report.output_sha256)}</code></dd></div></dl></div></section>
