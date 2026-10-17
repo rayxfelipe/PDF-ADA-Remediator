@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Classify every WCAG 2.1 Level A/AA criterion as pass, fail, not applicable, or out of scope instead of using ambiguous manual/not-tested states.
+- Add a document evidence inventory and criterion-level policy rationales with relevant W3C PDF technique identifiers.
+- Exclude not-applicable and out-of-scope checks from the automated accessibility score.
+- Require inherited non-empty form-field `/TU` descriptions; field names no longer count as descriptions.
+- Compare declared document language with seeded, confidence-gated deterministic language detection before reporting a pass or changing `/Lang`.
+- Reject generic, numbered, authoring-tool, and filename-like metadata titles, including `Scanned Document`.
+- Treat absent images, annotations, links, forms, scripts, media, tables, lists, and headings as not applicable instead of vacuous passes.
+- Add typed 400, 413, and 422 PDF input errors for malformed requests, oversized uploads, and unreadable PDF content.
+- Expire inactive standalone workflow sessions and delete only application-owned remediated files.
+- Audit Azure Function uploads before blob persistence and add expiration metadata to job blobs.
+- Add a generic external corpus runner that writes per-file JSON plus summary JSON/CSV with commit, runtime, dependency, source-hash, and repeatability evidence.
+- Allow container builds to receive standard pip index and trusted-host build arguments without hardcoding an organization-specific package feed.
 - Make the deterministic PDF audit the sole authority for remediation planning and verification.
 - Accept the source PDF directly in the remediator CLI and PDF-only API.
 - Add schema, checker, and ruleset versions plus source SHA-256 to deterministic audit reports.
@@ -30,6 +42,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Interpret `/MarkInfo /Marked = false` as false instead of relying on `BooleanObject` truthiness.
 - Do not accept generic metadata such as `PowerPoint Presentation` as a meaningful document title.
 - Reject empty structure trees and marked content without valid structure-element mappings.
+- Reject empty, corrupt, truncated, password-protected, and zero-page PDFs with explicit client errors.
+- Correct W3C PDF technique references for title, links, keyboard forms, headings, and structural checks.
+- Show only the source filename in reports instead of exposing the server or workstation path.
 
 ### Security
 

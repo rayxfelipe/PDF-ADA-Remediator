@@ -66,7 +66,7 @@ class RemediationReport:
     after_summary: dict[str, int]
     successful: int
     failed: int
-    manual_review: int
+    out_of_scope: int
     actions: list[RemediationAction]
     items: list[RemediationItem]
     after_audit: AuditReport
@@ -104,13 +104,19 @@ def _build_remediation_plan(
 
     actions: list[_PlannedAction] = []
     language = root.get("/Lang")
-    if findings["ACR-DOC-005"].status != "pass":
+    detected_language = str(before.evidence.get("detected_language", ""))
+    if findings["ACR-DOC-005"].status == "fail" and detected_language:
+        target_language = (
+            default_language
+            if default_language.casefold().split("-", 1)[0] == detected_language
+            else detected_language
+        )
         actions.append(_PlannedAction(
             "set-document-language",
             "ACR-DOC-005",
             "/Root/Lang",
             str(_resolve(language)) if language is not None else None,
-            default_language,
+            target_language,
         ))
 
     title = str(getattr(reader.metadata, "title", "") or "").strip()
@@ -157,12 +163,12 @@ def _remediation_items(before: AuditReport, after: AuditReport) -> list[Remediat
     items: list[RemediationItem] = []
     for original in before.findings:
         updated = after_by_id[original.check_id]
-        if original.status in {"not_applicable", "skipped"}:
+        if original.status == "not_applicable":
             status = "not_applicable"
             details = original.details
-        elif original.status == "manual" or updated.status == "manual":
-            status = "manual"
-            details = "This requirement needs human judgment or assistive-technology testing."
+        elif original.status == "out_of_scope" or updated.status == "out_of_scope":
+            status = "out_of_scope"
+            details = "This requirement is outside the scope of reliable automated testing."
         elif original.status == "pass" and updated.status == "pass":
             status = "passed"
             details = updated.details
@@ -244,17 +250,17 @@ def remediate_pdf(
     determination = wcag_determination(wcag_summary)
     checkpoints = [
         {"stage": "Source received", "status": "Complete", "details": f"SHA-256 {source_sha256}"},
-        {"stage": "Pre-remediation audit", "status": "Complete", "details": f"{before.summary.get('fail', 0)} deterministic failures; {before.summary.get('manual', 0)} manual checks"},
+        {"stage": "Pre-remediation audit", "status": "Complete", "details": f"{before.summary.get('fail', 0)} deterministic failures; {before.summary.get('out_of_scope', 0)} out-of-scope checks"},
         {"stage": "Automatic remediation", "status": "Complete", "details": f"{len(actions)} safe action(s) applied and verified"},
         {"stage": "Post-remediation audit", "status": "Complete", "details": f"SHA-256 {output_sha256}; {after.summary.get('fail', 0)} deterministic failures remain"},
-        {"stage": "Manual WCAG review", "status": "Pending" if wcag_summary.get("manual", 0) or wcag_summary.get("not_tested", 0) else "Not required", "details": f"{wcag_summary.get('manual', 0)} manual and {wcag_summary.get('not_tested', 0)} untested criteria"},
+        {"stage": "Out-of-scope criteria", "status": "Disclosed" if wcag_summary.get("out_of_scope", 0) else "None", "details": f"{wcag_summary.get('out_of_scope', 0)} criteria require capabilities beyond this automated application"},
         {"stage": "WCAG 2.1 AA determination", "status": "Incomplete" if determination.startswith("Incomplete") else "Ready for review", "details": determination},
     ]
     return RemediationReport(
-        schema_version=4,
-        source_file=str(source),
+        schema_version=5,
+        source_file=source.name,
         source_sha256=source_sha256,
-        remediated_file=str(destination),
+        remediated_file=destination.name,
         output_sha256=output_sha256,
         generated_at=datetime.now(timezone.utc).isoformat(),
         checker_version=before.checker_version,
@@ -265,7 +271,7 @@ def remediate_pdf(
         after_summary=dict(after.summary),
         successful=sum(item.status == "success" for item in items),
         failed=sum(item.status == "failed" for item in items),
-        manual_review=sum(item.status == "manual" for item in items),
+        out_of_scope=sum(item.status == "out_of_scope" for item in items),
         actions=actions,
         items=items,
         after_audit=after,
@@ -288,7 +294,7 @@ def write_remediation_html(
     labels = {
         "success": "Remediated",
         "failed": "Not remediated",
-        "manual": "Manual review",
+        "out_of_scope": "Out of scope",
         "passed": "Already passed",
         "not_applicable": "N/A or skipped",
     }
@@ -305,7 +311,7 @@ def write_remediation_html(
         for item in report.checkpoints
     )
     wcag_rows = "".join(
-        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.test_method)}</td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
         for item in report.wcag_results
     )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
@@ -323,18 +329,17 @@ def write_remediation_html(
 <div class="report-card report-kpi"><strong>{report.before_score} → {report.after_score}</strong><span>Automated accessibility score</span></div>
 <div class="report-card report-kpi pass"><strong>{report.before_summary.get('pass', 0)} → {report.after_summary.get('pass', 0)}</strong><span>Passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.before_summary.get('fail', 0)} → {report.after_summary.get('fail', 0)}</strong><span>Failed</span></div>
-<div class="report-card report-kpi manual"><strong>{report.manual_review}</strong><span>Manual checks</span></div>
-</div><div class="report-card status-banner"><strong>WCAG conformance determination</strong>{e(report.wcag_determination)}. “Automatic remediation complete” does not mean the PDF conforms to WCAG 2.1 Level AA.</div></section>
+<div class="report-card report-kpi manual"><strong>{report.out_of_scope}</strong><span>Out-of-scope checks</span></div>
+</div><div class="report-card status-banner"><strong>WCAG automated determination</strong>{e(report.wcag_determination)}. “Automatic remediation complete” does not mean the PDF conforms to WCAG 2.1 Level AA.</div></section>
 <section id="checkpoints" class="report-section" aria-labelledby="checkpoints-heading"><h3 id="checkpoints-heading">Audit and remediation checkpoints</h3><div class="report-card"><ul class="checkpoint-list">{checkpoint_rows}</ul></div></section>
 <section id="wcag" class="report-section" aria-labelledby="wcag-heading"><h3 id="wcag-heading">WCAG 2.1 Level AA remediation matrix</h3>
 <div class="report-kpis">
 <div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
-<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('manual', 0)}</strong><span>Manual verification</span></div>
-<div class="report-card report-kpi warning"><strong>{report.wcag_summary.get('not_tested', 0)}</strong><span>Not tested</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('out_of_scope', 0)}</strong><span>Out of scope</span></div>
 <div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Completion</th><th scope="col">Test method</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Completion</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
 </section>
 <section id="actions" class="report-section" aria-labelledby="actions-heading"><h3 id="actions-heading">Verified actions</h3><div class="report-card action"><ul>{action_rows}</ul></div></section>
 <section id="verification" class="report-section" aria-labelledby="verification-heading"><h3 id="verification-heading">Verification identity</h3>

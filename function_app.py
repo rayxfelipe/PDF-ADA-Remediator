@@ -6,12 +6,13 @@ import os
 import secrets
 import tempfile
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 import azure.functions as func
 
-from pdf_accessibility_audit import audit_pdf, write_html
+from pdf_accessibility_audit import PdfInputError, audit_pdf, write_html
 from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
@@ -19,6 +20,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 MAX_UPLOAD_BYTES = int(os.getenv("PDF_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 CONTAINER_NAME = os.getenv("PDF_CONTAINER_NAME", "pdf-jobs")
+JOB_TTL_HOURS = max(1, int(os.getenv("PDF_JOB_TTL_HOURS", "24")))
 
 
 def _blob_service():
@@ -68,6 +70,10 @@ def _job_blob(job_id: str, suffix: str) -> str:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _expiry_metadata() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=JOB_TTL_HOURS)).isoformat()
 
 
 def _validate_token(job_id: str, token: str) -> dict[str, str]:
@@ -168,19 +174,23 @@ def _audit_upload(req: func.HttpRequest) -> func.HttpResponse:
 
     job_id = str(uuid.uuid4())
     token = secrets.token_urlsafe(32)
-    source_blob = _container_client().get_blob_client(_job_blob(job_id, "source.pdf"))
-    source_blob.upload_blob(
-        body,
-        overwrite=False,
-        metadata={"filename": filename, "token_hash": _token_hash(token)},
-        content_settings=ContentSettings(content_type="application/pdf"),
-    )
 
     with tempfile.TemporaryDirectory() as directory:
         source = Path(directory) / filename
         report_file = Path(directory) / "report.html"
         source.write_bytes(body)
         report = audit_pdf(source)
+        source_blob = _container_client().get_blob_client(_job_blob(job_id, "source.pdf"))
+        source_blob.upload_blob(
+            body,
+            overwrite=False,
+            metadata={
+                "filename": filename,
+                "token_hash": _token_hash(token),
+                "expires_at": _expiry_metadata(),
+            },
+            content_settings=ContentSettings(content_type="application/pdf"),
+        )
         remediation_url = _route_url(req, "remediate", job=job_id)
         write_html(report, report_file, remediation_url, token)
         result = report_file.read_text(encoding="utf-8")
@@ -214,12 +224,14 @@ def _remediate(req: func.HttpRequest) -> func.HttpResponse:
         output_blob.upload_blob(
             remediated_bytes,
             overwrite=True,
-            metadata={"filename": remediated.name},
+            metadata={"filename": remediated.name, "expires_at": _expiry_metadata()},
             content_settings=ContentSettings(content_type="application/pdf"),
         )
         return func.HttpResponse(result_html, mimetype="text/html", status_code=200)
     except PermissionError as exc:
         return func.HttpResponse(str(exc), status_code=403)
+    except PdfInputError as exc:
+        return func.HttpResponse(str(exc), status_code=exc.status_code)
     except ValueError as exc:
         return func.HttpResponse(str(exc), status_code=400)
 
@@ -260,6 +272,8 @@ def pdf_accessibility(req: func.HttpRequest) -> func.HttpResponse:
         if req.method == "GET" and action == "download":
             return _download(req)
         return func.HttpResponse("Not found.", status_code=404)
+    except PdfInputError as exc:
+        return func.HttpResponse(str(exc), status_code=exc.status_code, mimetype="text/plain")
     except Exception as exc:
         return func.HttpResponse(
             f"PDF processing failed: {html.escape(str(exc))}",

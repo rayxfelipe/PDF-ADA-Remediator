@@ -5,6 +5,7 @@ import os
 import secrets
 import sys
 import tempfile
+import time
 import webbrowser
 from http.cookies import SimpleCookie
 from email.parser import BytesParser
@@ -15,7 +16,7 @@ from threading import RLock
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from pdf_accessibility_audit import REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, write_html, write_json
+from pdf_accessibility_audit import PdfInputError, REMEDIATION_REPORTS_DIR, AuditReport, audit_pdf, write_html, write_json
 from pdf_accessibility_remediator import RemediationReport, remediate_pdf, write_remediation_html
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
@@ -63,7 +64,7 @@ def _safe_upload_name(value: str) -> str:
 
 def _parse_pdf_upload(content_type: str, body: bytes) -> tuple[str, bytes]:
     if not content_type.lower().startswith("multipart/form-data;"):
-        raise ValueError("Upload must use multipart/form-data.")
+        raise PdfInputError("Upload must use multipart/form-data.", 400)
     message = BytesParser(policy=email_policy).parsebytes(
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + body
     )
@@ -72,15 +73,16 @@ def _parse_pdf_upload(content_type: str, body: bytes) -> tuple[str, bytes]:
     for part in message.iter_parts():
         if part.get_param("name", header="content-disposition") == "pdf":
             filename = _safe_upload_name(part.get_filename() or "")
-            payload = part.get_payload(decode=True) or b""
+            decoded = part.get_payload(decode=True)
+            payload = decoded if isinstance(decoded, bytes) else b""
     if not filename.lower().endswith(".pdf"):
-        raise ValueError("Select a PDF file.")
+        raise PdfInputError("Select a PDF file.", 400)
     if not payload:
-        raise ValueError("The uploaded PDF is empty.")
+        raise PdfInputError("The uploaded PDF is empty.", 400)
     if len(payload) > MAX_PDF_BYTES:
-        raise ValueError(f"The uploaded PDF exceeds the {MAX_PDF_BYTES}-byte limit.")
+        raise PdfInputError(f"The uploaded PDF exceeds the {MAX_PDF_BYTES}-byte limit.", 413)
     if not payload.startswith(b"%PDF-"):
-        raise ValueError("The uploaded file is not a valid PDF.")
+        raise PdfInputError("The uploaded file is not a valid PDF.", 400)
     return filename, payload
 
 
@@ -136,11 +138,34 @@ def _attachment_header(filename: str) -> str:
     return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
 
 
+def _delete_owned_output(state: dict[str, Any]) -> None:
+    path = state.get("remediated_path")
+    if state.get("owns_remediated_path") and isinstance(path, Path):
+        path.unlink(missing_ok=True)
+
+
+def _cleanup_expired_sessions(
+    session_states: dict[str, dict[str, Any]],
+    now: float,
+    ttl_seconds: int,
+) -> int:
+    expired = [
+        session_id
+        for session_id, state in session_states.items()
+        if now - float(state.get("last_access", 0)) >= ttl_seconds
+    ]
+    for session_id in expired:
+        _delete_owned_output(session_states[session_id])
+        del session_states[session_id]
+    return len(expired)
+
+
 def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open_browser: bool) -> None:
     """Accept a browser upload and retain only its remediated output."""
     host = os.getenv("WORKFLOW_HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "0"))
     secure_cookie = bool(os.getenv("WEBSITE_HOSTNAME"))
+    session_ttl_seconds = max(60, int(os.getenv("WORKFLOW_SESSION_TTL_SECONDS", "3600")))
     session_states: dict[str, dict[str, Any]] = {}
     sessions_lock = RLock()
 
@@ -153,6 +178,8 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             "remediation": None,
             "remediation_html": None,
             "remediated_path": None,
+            "owns_remediated_path": False,
+            "last_access": time.monotonic(),
         }
 
     class WorkflowHandler(BaseHTTPRequestHandler):
@@ -166,6 +193,8 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             candidate = cookie.get("pdf_workflow")
             requested_id = candidate.value if candidate else ""
             with sessions_lock:
+                now = time.monotonic()
+                _cleanup_expired_sessions(session_states, now, session_ttl_seconds)
                 if requested_id in session_states:
                     self.session_id = requested_id
                 else:
@@ -175,6 +204,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                     if secure_cookie:
                         attributes.append("Secure")
                     self.session_cookie = "; ".join(attributes)
+                session_states[self.session_id]["last_access"] = now
                 return session_states[self.session_id]
 
         def end_headers(self) -> None:
@@ -193,6 +223,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
 
         def _audit_upload(self, content_type: str, body: bytes) -> None:
             state = self._state()
+            _delete_owned_output(state)
             filename, pdf_bytes = _parse_pdf_upload(content_type, body)
             with tempfile.TemporaryDirectory() as directory:
                 work_dir = Path(directory)
@@ -208,6 +239,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                     remediation=None,
                     remediation_html=None,
                     remediated_path=None,
+                    owns_remediated_path=False,
                 )
             print(f"Audit score for {filename}: {report.score}/100")
 
@@ -236,6 +268,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 state["remediation_html"] = remediation_html.read_bytes()
             state["remediation"] = report
             state["remediated_path"] = output
+            state["owns_remediated_path"] = remediated_pdf_path is None
 
         def do_GET(self) -> None:
             route = urlparse(self.path).path
@@ -247,6 +280,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                 if route in {"/", "/report.html"}:
                     self._send_bytes(state["audit_html"] or UPLOAD_PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 elif route == "/new":
+                    _delete_owned_output(state)
                     state.update(
                         source_name=None,
                         source_bytes=None,
@@ -254,6 +288,7 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                         remediation=None,
                         remediation_html=None,
                         remediated_path=None,
+                        owns_remediated_path=False,
                     )
                     self.send_response(303)
                     self.send_header("Location", "/")
@@ -280,25 +315,33 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             if route not in {"/upload-pdf", "/remediate", "/api/remediate"}:
                 self.send_error(404)
                 return
+            if route == "/api/remediate" and not _valid_api_key(
+                os.getenv("REMEDIATOR_API_KEY", ""),
+                self.headers.get("X-Remediator-Key", ""),
+            ):
+                self.send_error(401, "Invalid remediation API key")
+                self.close_connection = True
+                return
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 self.send_error(400, "Invalid content length")
                 return
-            if content_length <= 0 or content_length > MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES:
+            if content_length <= 0:
+                self.send_error(400, "A request body is required")
+                return
+            if content_length > MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES:
                 self.send_error(413, "Upload is too large")
+                self.close_connection = True
                 return
 
             body = self.rfile.read(content_length)
             if route == "/api/remediate":
-                if not _valid_api_key(os.getenv("REMEDIATOR_API_KEY", ""), self.headers.get("X-Remediator-Key", "")):
-                    self.send_error(401, "Invalid remediation API key")
-                    return
                 try:
                     pdf_name, pdf_bytes = _parse_pdf_upload(self.headers.get("Content-Type", ""), body)
                     output_name, output_bytes = remediate_api_payload(pdf_name, pdf_bytes, default_language)
-                except ValueError as exc:
-                    self.send_error(400, str(exc))
+                except PdfInputError as exc:
+                    self.send_error(exc.status_code, str(exc))
                     return
                 except Exception as exc:
                     self.send_error(500, f"Remediation failed: {exc}")
@@ -324,6 +367,9 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
                     raise ValueError("Upload a PDF before requesting remediation.")
                 form = parse_qs(body.decode("utf-8", errors="replace"))
                 submitted = form.get("token", [""])[0]
+            except PdfInputError as exc:
+                self.send_error(exc.status_code, str(exc))
+                return
             except ValueError as exc:
                 self.send_error(400, str(exc))
                 return

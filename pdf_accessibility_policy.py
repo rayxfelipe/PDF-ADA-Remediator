@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Protocol
+from typing import Iterable, Mapping, Protocol
 
 
 class FindingLike(Protocol):
-    check_id: str
-    status: str
+    @property
+    def check_id(self) -> str: ...
+
+    @property
+    def status(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,8 @@ class WcagResult:
     test_method: str
     status: str
     check_ids: tuple[str, ...]
+    rationale: str
+    techniques: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,8 @@ class WcagComparison:
     after_status: str
     completion: str
     check_ids: tuple[str, ...]
+    rationale: str
+    techniques: tuple[str, ...]
 
 
 WCAG_STANDARD = "WCAG 2.1 Level AA"
@@ -101,18 +108,17 @@ RULE_WCAG_MAP = {
     "ACR-DOC-004": ("1.3.2",),
     "ACR-DOC-005": ("3.1.1",),
     "ACR-DOC-006": ("2.4.2",),
-    "ACR-DOC-007": ("2.4.5",),
+    "ACR-DOC-007": ("2.4.1",),
     "ACR-DOC-008": ("1.4.3",),
     "ACR-PAGE-001": ("1.3.1", "1.3.2"),
     "ACR-PAGE-002": ("1.3.1", "4.1.2"),
-    "ACR-PAGE-003": ("2.4.3",),
-    "ACR-PAGE-004": ("1.3.1", "4.1.2"),
+    "ACR-PAGE-003": ("2.1.1", "2.4.3"),
     "ACR-PAGE-006": ("2.3.1",),
     "ACR-PAGE-007": ("2.1.1", "2.1.2", "4.1.2"),
     "ACR-PAGE-008": ("2.2.1", "2.2.2"),
-    "ACR-PAGE-009": ("2.4.4", "3.2.3"),
+    "ACR-PAGE-009": ("2.4.4",),
     "ACR-FORM-001": ("1.3.1", "4.1.2"),
-    "ACR-FORM-002": ("2.4.6", "3.3.2", "4.1.2"),
+    "ACR-FORM-002": ("3.3.2", "4.1.2"),
     "ACR-ALT-001": ("1.1.1",),
     "ACR-ALT-002": ("1.1.1",),
     "ACR-ALT-003": ("1.1.1",),
@@ -122,7 +128,6 @@ RULE_WCAG_MAP = {
     "ACR-TABLE-002": ("1.3.1",),
     "ACR-TABLE-003": ("1.3.1",),
     "ACR-TABLE-004": ("1.3.1",),
-    "ACR-TABLE-005": ("1.3.1",),
     "ACR-LIST-001": ("1.3.1",),
     "ACR-LIST-002": ("1.3.1",),
     "ACR-HEAD-001": ("1.3.1", "2.4.6"),
@@ -143,19 +148,70 @@ RULE_TEST_METHOD = {
 WCAG_STATUS_LABELS = {
     "pass": "Passed",
     "fail": "Failed",
-    "manual": "Manual verification required",
-    "not_tested": "Not tested by this application",
     "not_applicable": "Not applicable",
+    "out_of_scope": "Out of scope for automated testing",
 }
 
 WCAG_COMPLETION_LABELS = {
     "automatically_remediated": "Automatically remediated and verified",
     "already_passed": "Already passed",
     "not_remediated": "Not remediated",
-    "manual_review": "Manual verification required",
-    "not_tested": "Not tested by this application",
     "not_applicable": "Not applicable",
-    "verified_pass": "Passed after verification",
+    "out_of_scope": "Out of scope for automated testing",
+}
+
+# criterion: (policy mode, evidence key, rationale, W3C PDF technique IDs)
+WCAG_POLICY = {
+    "1.1.1": ("mapped", "", "Images and figures can be checked for tags and text alternatives.", ("PDF1", "PDF4")),
+    "1.2.1": ("out_of_scope_if", "dynamic_content", "Prerecorded audio or video alternatives require media interpretation.", ()),
+    "1.2.2": ("out_of_scope_if", "dynamic_content", "Caption accuracy and synchronization require media interpretation.", ()),
+    "1.2.3": ("out_of_scope_if", "dynamic_content", "Audio descriptions and media alternatives require semantic review.", ()),
+    "1.2.4": ("out_of_scope_if", "dynamic_content", "Live caption behavior cannot be established from static PDF objects.", ()),
+    "1.2.5": ("out_of_scope_if", "dynamic_content", "Audio-description adequacy requires semantic review.", ()),
+    "1.3.1": ("mapped", "", "Tagging, forms, tables, lists, and headings provide machine-testable structural evidence.", ("PDF6", "PDF9", "PDF10", "PDF12", "PDF21")),
+    "1.3.2": ("mapped", "", "Structure order is testable, but meaningful reading-order quality remains interpretive.", ("PDF3",)),
+    "1.3.3": ("out_of_scope", "", "Instructions based on shape, position, or sound require semantic interpretation.", ()),
+    "1.3.4": ("not_applicable", "", "Page orientation is controlled by the PDF reader for a stand-alone PDF.", ()),
+    "1.3.5": ("out_of_scope_if", "fields", "PDF fields do not expose HTML autocomplete purposes; field purpose is semantic.", ()),
+    "1.4.1": ("out_of_scope", "", "Determining whether color alone conveys meaning requires visual and semantic review.", ()),
+    "1.4.2": ("out_of_scope_if", "dynamic_content", "Audio-control behavior requires media playback testing.", ()),
+    "1.4.3": ("mapped", "", "Reliable contrast measurement requires rendering and visual context not implemented here.", ()),
+    "1.4.4": ("out_of_scope", "", "Text-resize behavior requires rendered-viewer testing.", ()),
+    "1.4.5": ("out_of_scope_if", "images", "Distinguishing informative images of text from other images requires interpretation.", ("PDF7",)),
+    "1.4.10": ("out_of_scope", "", "Reflow quality requires rendered-viewer and semantic structure testing.", ()),
+    "1.4.11": ("out_of_scope", "", "Non-text contrast requires rendered visual analysis.", ()),
+    "1.4.12": ("out_of_scope", "", "Text-spacing behavior requires rendered-viewer testing.", ()),
+    "1.4.13": ("out_of_scope_if", "dynamic_content", "Hover or focus content requires interactive viewer testing.", ()),
+    "2.1.1": ("out_of_scope_if", "interactive_controls", "Interactive controls can be inventoried, but complete keyboard operation requires execution.", ("PDF23",)),
+    "2.1.2": ("out_of_scope_if", "interactive_controls", "Interactive controls can be inventoried, but keyboard-trap behavior requires execution.", ()),
+    "2.1.4": ("out_of_scope_if", "scripts", "Character-key shortcut behavior requires script execution.", ()),
+    "2.2.1": ("mapped", "", "Potential timing mechanisms can be detected, but their behavior requires execution.", ()),
+    "2.2.2": ("mapped", "", "Potential moving or timed content can be detected, but controls require execution.", ()),
+    "2.3.1": ("mapped", "", "Potential dynamic content can be detected, but flash thresholds require playback analysis.", ()),
+    "2.4.1": ("mapped", "", "Multi-page documents can be checked for tagged headings that support bypass navigation.", ("PDF9",)),
+    "2.4.2": ("mapped", "", "Metadata title quality and title-bar display are machine-testable.", ("PDF18",)),
+    "2.4.3": ("mapped", "", "Focusable annotations can be checked for structure-based tab order.", ("PDF3",)),
+    "2.4.4": ("mapped", "", "Link annotations can be checked for accessible text or contents.", ("PDF11", "PDF13")),
+    "2.4.5": ("not_applicable", "", "Multiple ways applies to sets of web pages, not a stand-alone PDF.", ("PDF2",)),
+    "2.4.6": ("mapped", "", "Existing tagged headings can be checked for non-empty, valid levels.", ("PDF9",)),
+    "2.4.7": ("out_of_scope_if", "interactive_controls", "Focus-indicator behavior for document controls requires interactive viewer testing.", ()),
+    "2.5.1": ("out_of_scope_if", "interactive_controls", "Multipoint gesture behavior requires interactive execution.", ()),
+    "2.5.2": ("out_of_scope_if", "interactive_controls", "Pointer cancellation behavior requires interactive execution.", ()),
+    "2.5.3": ("out_of_scope_if", "interactive_controls", "Visible-label comparison requires rendered text-to-control association.", ()),
+    "2.5.4": ("out_of_scope_if", "interactive_controls", "Motion-actuation behavior requires interactive execution.", ()),
+    "3.1.1": ("mapped", "", "The declared BCP 47 language can be compared with deterministic text-language evidence.", ("PDF16",)),
+    "3.1.2": ("out_of_scope_if", "text_pages", "Detecting and validating every language change requires passage-level semantic analysis.", ("PDF19",)),
+    "3.2.1": ("out_of_scope_if", "interactive_controls", "Changes on focus require interactive execution.", ()),
+    "3.2.2": ("out_of_scope_if", "interactive_controls", "Changes on input require interactive execution.", ()),
+    "3.2.3": ("not_applicable", "", "Consistent navigation applies across a set of documents or pages, not one stand-alone PDF.", ()),
+    "3.2.4": ("not_applicable", "", "Consistent identification applies across a set of documents or pages.", ()),
+    "3.3.1": ("out_of_scope_if", "fields_or_actions", "Error-identification behavior requires form execution and semantic review.", ()),
+    "3.3.2": ("mapped", "", "Form fields can be checked for inherited non-empty tooltips.", ("PDF10",)),
+    "3.3.3": ("out_of_scope_if", "fields_or_actions", "Error-suggestion adequacy requires form execution and semantic review.", ()),
+    "3.3.4": ("out_of_scope_if", "fields_or_actions", "Error-prevention behavior requires transactional form execution.", ()),
+    "4.1.1": ("out_of_scope", "", "Full PDF syntax and structure validity requires an independent PDF validator.", ()),
+    "4.1.2": ("mapped", "", "Widgets, links, tags, and accessible names provide machine-testable name-role-value evidence.", ("PDF10", "PDF12")),
+    "4.1.3": ("out_of_scope_if", "dynamic_content", "Status-message behavior requires interactive execution and assistive-technology observation.", ()),
 }
 
 
@@ -165,18 +221,16 @@ def _criterion_rule_ids(criterion: str) -> tuple[str, ...]:
 
 def _aggregate_status(statuses: list[str]) -> str:
     if not statuses:
-        return "not_tested"
+        return "out_of_scope"
     if "fail" in statuses:
         return "fail"
-    if "skipped" in statuses:
-        return "not_tested"
-    if "manual" in statuses or "warning" in statuses:
-        return "manual"
+    if "out_of_scope" in statuses:
+        return "out_of_scope"
     if "pass" in statuses:
         return "pass"
     if all(status == "not_applicable" for status in statuses):
         return "not_applicable"
-    return "not_tested"
+    return "out_of_scope"
 
 
 def _test_method(check_ids: tuple[str, ...]) -> str:
@@ -192,16 +246,25 @@ def _test_method(check_ids: tuple[str, ...]) -> str:
     return "Mixed"
 
 
-def build_wcag_results(findings: Iterable[FindingLike]) -> list[WcagResult]:
+def build_wcag_results(
+    findings: Iterable[FindingLike],
+    evidence: Mapping[str, int | float | str | bool],
+) -> list[WcagResult]:
     findings_by_id = {item.check_id: item for item in findings}
     results: list[WcagResult] = []
     for item in WCAG_21_AA_CRITERIA:
         check_ids = _criterion_rule_ids(item.criterion)
-        statuses = [findings_by_id[check_id].status for check_id in check_ids if check_id in findings_by_id]
-        status = _aggregate_status(statuses)
-        applicability = "undetermined" if not check_ids else (
-            "not_applicable" if status == "not_applicable" else "applicable"
-        )
+        mode, evidence_key, rationale, techniques = WCAG_POLICY[item.criterion]
+        if mode == "mapped":
+            statuses = [findings_by_id[check_id].status for check_id in check_ids if check_id in findings_by_id]
+            status = _aggregate_status(statuses)
+        elif mode == "not_applicable":
+            status = "not_applicable"
+        elif mode == "out_of_scope":
+            status = "out_of_scope"
+        else:
+            status = "out_of_scope" if evidence.get(evidence_key, 0) else "not_applicable"
+        applicability = status if status in {"not_applicable", "out_of_scope"} else "applicable"
         results.append(WcagResult(
             item.criterion,
             item.name,
@@ -210,6 +273,8 @@ def build_wcag_results(findings: Iterable[FindingLike]) -> list[WcagResult]:
             _test_method(check_ids),
             status,
             check_ids,
+            rationale,
+            techniques,
         ))
     return results
 
@@ -218,7 +283,7 @@ def summarize_wcag(results: Iterable[WcagResult]) -> dict[str, int]:
     items = list(results)
     return {
         status: sum(item.status == status for item in items)
-        for status in ("pass", "fail", "manual", "not_tested", "not_applicable")
+        for status in ("pass", "fail", "not_applicable", "out_of_scope")
     }
 
 
@@ -229,10 +294,8 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
         original = before_by_id[updated.criterion]
         if updated.status == "not_applicable":
             completion = "not_applicable"
-        elif updated.status == "not_tested":
-            completion = "not_tested"
-        elif updated.status == "manual":
-            completion = "manual_review"
+        elif updated.status == "out_of_scope":
+            completion = "out_of_scope"
         elif updated.status == "fail":
             completion = "not_remediated"
         elif original.status == "pass":
@@ -240,7 +303,7 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
         elif original.status != "pass" and updated.status == "pass":
             completion = "automatically_remediated"
         else:
-            completion = "verified_pass"
+            completion = "already_passed"
         comparisons.append(WcagComparison(
             updated.criterion,
             updated.name,
@@ -251,6 +314,8 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
             updated.status,
             completion,
             updated.check_ids,
+            updated.rationale,
+            updated.techniques,
         ))
     return comparisons
 
@@ -258,6 +323,6 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
 def wcag_determination(summary: dict[str, int]) -> str:
     if summary.get("fail", 0):
         return "Incomplete — deterministic failures remain"
-    if summary.get("manual", 0) or summary.get("not_tested", 0):
-        return "Incomplete — manual or unsupported criteria remain"
-    return "Ready for qualified conformance review"
+    if summary.get("out_of_scope", 0):
+        return "Passes all automated checks — out-of-scope criteria remain"
+    return "Passes all automated WCAG 2.1 A/AA checks"

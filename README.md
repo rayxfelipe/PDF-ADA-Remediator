@@ -28,6 +28,7 @@ Every audit report includes:
 - Page count
 - Stable rule identifiers
 - Structured findings
+- A document evidence inventory
 - Evidence and remediation guidance
 
 Every remediation report includes:
@@ -37,12 +38,13 @@ Every remediation report includes:
 - Before and after summaries
 - Planned and verified actions
 - Rule-level outcomes
-- Items requiring human review
+- Explicit out-of-scope outcomes
 - A complete WCAG 2.1 Level A/AA coverage matrix
 - Explicit mappings from WCAG criteria to deterministic application checks
+- Policy rationale and relevant W3C PDF technique identifiers
 - Pre- and post-remediation checkpoints
-- Separate automatic, manual, unsupported, and not-applicable states
-- A conformance determination indicator that remains incomplete while failures, manual review, or unsupported criteria remain
+- Four result states: pass, fail, not applicable, and out of scope
+- An automated determination that remains incomplete while deterministic failures remain and separately identifies out-of-scope coverage
 
 The numerical result is labeled an **automated accessibility score**. It measures the deterministic checks implemented by this application and must not be interpreted as a WCAG compliance percentage.
 
@@ -62,7 +64,7 @@ The rules are independently implemented with `pypdf`. They do not invoke or repr
 
 The remediator currently applies only these deterministic changes:
 
-- Add a missing default document language.
+- Set or correct the default document language only when repeatable text-language evidence is sufficiently strong.
 - Enable title display when a meaningful title already exists.
 - Set structure-based page tab order when the existing structure tree passes local validation.
 
@@ -70,6 +72,7 @@ The remediator does not:
 
 - Invent document titles.
 - Accept generic titles such as `PowerPoint Presentation` as meaningful.
+- Accept placeholders such as `Scanned Document`, numbered scan names, or filename-like titles as meaningful.
 - Generate semantic tags.
 - Generate OCR text.
 - Invent alternate text.
@@ -116,6 +119,7 @@ python pdf_accessibility_workflow.py --no-open
 ```
 
 Uploaded source PDFs and temporary reports are held only for the active workflow session. The local workflow persists only the remediated output under `reports/remediated`.
+In-memory browser sessions expire after one hour by default, and their application-owned remediated files are deleted. Set `WORKFLOW_SESSION_TTL_SECONDS` to change the timeout.
 
 ## Run the checker
 
@@ -158,9 +162,33 @@ The endpoint audits, remediates, and verifies the PDF locally. It returns the re
 
 Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` request header. Leaving the setting empty is suitable only for local development.
 
+## Current Azure deployment
+
+The staging/pilot App Service is available at:
+
+<https://app-ada-remediator-poc-33f3poc.azurewebsites.net>
+
+The deployed standalone browser workflow runs `pdf_accessibility_workflow.py` from the immutable container image:
+
+- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag5-5f3e1b7`
+- Digest: `sha256:97493b7c6bcd4c8f426a440c498db7486439c5c7f788bf44e81a43873a21afe0`
+- Checker version: `2.2.0`
+- Ruleset version: `2026.10.2`
+- Audit schema: `5`
+
+Release validation completed on October 16, 2026:
+
+- 20 unit and integration tests passed.
+- All 42 external source PDFs passed two-run audit, WCAG matrix, source-hash, output-hash, and reported-hash repeatability checks.
+- All 76 tagged-set records passed the same repeatability and hash checks.
+- The production container built and ran as the non-root `app` user.
+- Live health, audit, remediation, and remediated-PDF download checks returned HTTP 200.
+
+The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
+
 ## Azure Functions
 
-[function_app.py](./function_app.py) provides the Azure-hosted browser workflow:
+[function_app.py](./function_app.py) provides an alternative Azure Functions hosting surface:
 
 1. Upload and deterministically audit a PDF.
 2. Store the active job's source PDF in private blob storage.
@@ -168,7 +196,8 @@ Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` req
 4. Re-audit the stored source immediately before remediation.
 5. Return a verified remediated PDF.
 
-The Azure workflow does not call or depend on another checker application.
+The Azure Functions workflow does not call or depend on another checker application. The current pilot endpoint above uses the standalone App Service workflow rather than this Functions entry point.
+Job blobs include an expiration timestamp and are covered by the storage lifecycle policy. Set `PDF_JOB_TTL_HOURS` to change the metadata timestamp; the deployed lifecycle policy remains the deletion authority.
 
 ## Deterministic behavior
 
@@ -179,7 +208,29 @@ For identical PDF bytes and the same checker and ruleset versions:
 - The same remediation plan is produced.
 - Repeated remediation produces the same logical PDF-object changes.
 
-Generation timestamps and serialized PDF bytes can differ when a PDF library rewrites a document. Verification therefore compares identified source/output hashes and rule-level object evidence rather than assuming byte-for-byte equality.
+Generation timestamps differ, but repeated runs with the same runtime and dependency versions are expected to produce identical findings, WCAG matrices, remediation plans, and output hashes.
+
+## Run an external corpus regression
+
+Keep customer PDFs and manifests outside the repository. Point the generic runner at that external directory:
+
+```powershell
+python corpus_regression.py `
+  --input-dir "C:\path\to\external-corpus" `
+  --out "reports\corpus"
+```
+
+Use `--manifest "C:\path\to\manifest.json"` when only listed files should run. A manifest is a JSON list of relative paths, objects with a `file` property, or records whose first value is the relative path.
+
+The runner audits and remediates every file twice and writes:
+
+- One JSON record per source PDF
+- `corpus-summary.json`
+- `corpus-summary.csv`
+- Git commit, dirty-worktree state, application-code fingerprint, Python, `pypdf`, `langdetect`, schema, checker, and ruleset versions
+- Source hashes and audit, matrix, remediation-output, and reported-hash repeatability checks
+
+The default `reports` directory is ignored by Git.
 
 ## Tests
 
@@ -194,9 +245,14 @@ The tests cover:
 - Stable 32-rule output
 - Repeated deterministic audits
 - Source hashing and contract versions
-- Language remediation
+- Language match, mismatch, insufficient-evidence, and remediation behavior
 - Meaningful-title handling
-- Generic-title rejection
+- Placeholder and filename-like title rejection
+- Correct not-applicable and out-of-scope classification
+- Inherited form-field `/TU` validation
+- Typed empty, corrupt, truncated, encrypted, and zero-page PDF errors
+- Session expiration and application-owned output cleanup
+- External corpus JSON/CSV and repeatability output
 - Correct `/MarkInfo /Marked = false` handling
 - Preservation of source structure and metadata
 - PDF-only workflow and API behavior

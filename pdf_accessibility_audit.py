@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import html
 import json
+import re
 import sys
 import webbrowser
 from dataclasses import asdict, dataclass
@@ -11,8 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from langdetect import DetectorFactory, LangDetectException, detect_langs
 from pypdf import PdfReader
 from pypdf.constants import UserAccessPermissions
+from pypdf.errors import EmptyFileError, FileNotDecryptedError, PdfReadError, PdfStreamError
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, IndirectObject
 
 from pdf_accessibility_policy import (
@@ -52,6 +55,7 @@ class AuditReport:
     rating: str
     standard_basis: list[str]
     disclaimer: str
+    evidence: dict[str, int | float | str | bool]
     summary: dict[str, int]
     findings: list[Finding]
     wcag_standard: str
@@ -61,9 +65,9 @@ class AuditReport:
 
 
 WEIGHTS = {"critical": 10, "high": 7, "medium": 4, "low": 1}
-AUDIT_SCHEMA_VERSION = 4
-CHECKER_VERSION = "2.1.0"
-RULESET_VERSION = "2026.10.1"
+AUDIT_SCHEMA_VERSION = 5
+CHECKER_VERSION = "2.2.0"
+RULESET_VERSION = "2026.10.2"
 ACROBAT_RULE_IDS = (
     "ACR-DOC-001", "ACR-DOC-002", "ACR-DOC-003", "ACR-DOC-004",
     "ACR-DOC-005", "ACR-DOC-006", "ACR-DOC-007", "ACR-DOC-008",
@@ -90,8 +94,16 @@ DISCLAIMER = (
     f"The screening policy is derived from {SOURCE_DOCUMENT}, which requires full PDF/UA "
     "conformance for PDF documents and identifies text alternatives, keyboard navigation, "
     "and a minimum 4.5:1 color-contrast ratio as accessibility targets. "
-    "Items marked Manual review require testing by a qualified reviewer and assistive-technology users."
+    "Criteria marked Out of scope require capabilities or judgment beyond this automated application."
 )
+DetectorFactory.seed = 0
+BCP47_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+
+
+class PdfInputError(ValueError):
+    def __init__(self, message: str, status_code: int = 422) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _resolve(value: Any) -> Any:
@@ -122,12 +134,73 @@ def is_meaningful_title(title: str, source_path: str | Path) -> bool:
     source_stem = " ".join(Path(source_path).stem.replace("_", " ").replace("-", " ").casefold().split())
     generic_titles = {
         "document",
+        "document1",
         "microsoft word",
         "powerpoint presentation",
         "presentation",
+        "scanned document",
+        "slide 1",
         "untitled",
     }
-    return bool(normalized) and normalized not in generic_titles and normalized != source_stem
+    authoring_prefixes = ("microsoft word -", "microsoft powerpoint -")
+    filename_suffixes = (".pdf", ".doc", ".docx", ".ppt", ".pptx")
+    compact = re.sub(r"[\s._-]+", "", normalized)
+    placeholder_number = re.fullmatch(r"(?:document|doc|scan|slide)\d+", compact)
+    return (
+        len(normalized) >= 4
+        and normalized not in generic_titles
+        and normalized != source_stem
+        and not normalized.startswith(authoring_prefixes)
+        and not normalized.endswith(filename_suffixes)
+        and placeholder_number is None
+    )
+
+
+def _detect_document_language(text: str) -> tuple[str, float] | None:
+    sample = " ".join(text.split())[:20000]
+    if sum(character.isalpha() for character in sample) < 40:
+        return None
+    try:
+        candidates = detect_langs(sample)
+    except LangDetectException:
+        return None
+    if not candidates or candidates[0].prob < 0.90:
+        return None
+    return candidates[0].lang.casefold(), round(candidates[0].prob, 4)
+
+
+def _language_primary(value: str) -> str:
+    return value.split("-", 1)[0].casefold()
+
+
+def _inherited_text(value: Any, key: str) -> str:
+    visited: set[tuple[int, int]] = set()
+    while value is not None:
+        if isinstance(value, IndirectObject):
+            reference = (value.idnum, value.generation)
+            if reference in visited:
+                return ""
+            visited.add(reference)
+        value = _resolve(value)
+        if not isinstance(value, DictionaryObject):
+            return ""
+        text = _text(value.get(key))
+        if text:
+            return text
+        value = value.get("/Parent")
+    return ""
+
+
+def _name_tree_count(value: Any) -> int:
+    value = _resolve(value)
+    if not isinstance(value, DictionaryObject):
+        return 0
+    names = _resolve(value.get("/Names"))
+    count = len(names) // 2 if isinstance(names, (ArrayObject, list, tuple)) else 0
+    kids = _resolve(value.get("/Kids"))
+    if isinstance(kids, (ArrayObject, list, tuple)):
+        count += sum(_name_tree_count(item) for item in kids)
+    return count
 
 
 def _walk_structure(value: Any, visited: set[tuple[int, int]] | None = None) -> Iterable[DictionaryObject]:
@@ -311,18 +384,24 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     if not path.is_file():
         raise FileNotFoundError(f"PDF not found: {path}")
     if path.suffix.lower() != ".pdf":
-        raise ValueError("Input must be a PDF file.")
+        raise PdfInputError("Input must be a PDF file.", 400)
+    if path.stat().st_size == 0:
+        raise PdfInputError("The PDF is empty.", 400)
 
-    reader = PdfReader(str(path), strict=False)
-    was_encrypted = reader.is_encrypted
-    if was_encrypted:
-        try:
-            reader.decrypt("")
-        except Exception as exc:
-            raise ValueError("The PDF is encrypted and cannot be audited without a password.") from exc
+    try:
+        reader = PdfReader(str(path), strict=False)
+        was_encrypted = reader.is_encrypted
+        if was_encrypted and not reader.decrypt(""):
+            raise PdfInputError("The PDF is encrypted and cannot be opened without a password.")
+        root = _catalog(reader)
+        page_count = len(reader.pages)
+    except PdfInputError:
+        raise
+    except (EmptyFileError, FileNotDecryptedError, PdfReadError, PdfStreamError, EOFError) as exc:
+        raise PdfInputError("The PDF is corrupt, truncated, or otherwise unreadable.") from exc
+    if page_count == 0:
+        raise PdfInputError("The PDF contains no pages.")
 
-    root = _catalog(reader)
-    page_count = len(reader.pages)
     findings: list[Finding] = []
     mark_info = _resolve(root.get("/MarkInfo"))
     marked = isinstance(mark_info, DictionaryObject) and _pdf_boolean(mark_info.get("/Marked"))
@@ -338,6 +417,7 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     no_text_pages: list[int] = []
     scanned_pages: list[int] = []
     extraction_errors: list[int] = []
+    text_chunks: list[str] = []
     image_count = 0
     for page_number, page in enumerate(reader.pages, start=1):
         page_images = _page_image_count(page)
@@ -351,6 +431,8 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
             no_text_pages.append(page_number)
             if page_images > 0:
                 scanned_pages.append(page_number)
+        else:
+            text_chunks.append(extracted)
     nodes = _structure_nodes(struct_root) if has_structure else []
     roles = [(_text(element.get("/S")).lstrip("/"), element, parent) for element, parent in nodes]
     figures = [element for role, element, _ in roles if role == "Figure"]
@@ -364,10 +446,31 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         fields = reader.get_fields() or {}
     except Exception:
         fields = {}
+    field_values = list(fields.values()) if fields else widgets
     missing_descriptions = [
         str(name) for name, field in fields.items()
-        if isinstance(field, dict) and not (_text(field.get("/TU")) or _text(field.get("/T")))
+        if isinstance(field, dict) and not _inherited_text(field, "/TU")
     ]
+    if not fields:
+        missing_descriptions = [
+            f"widget-{index}"
+            for index, field in enumerate(widgets, start=1)
+            if not _inherited_text(field, "/TU")
+        ]
+    field_count = len(field_values)
+    detected_language = _detect_document_language("\n".join(text_chunks))
+    language_valid = bool(language and BCP47_PATTERN.fullmatch(language))
+    language_matches = bool(
+        language_valid
+        and detected_language
+        and _language_primary(language) == detected_language[0]
+    )
+    names = _resolve(root.get("/Names"))
+    embedded_files = _name_tree_count(names.get("/EmbeddedFiles")) if isinstance(names, DictionaryObject) else 0
+    form_actions = sum(
+        item.get("/A") is not None or item.get("/AA") is not None
+        for item in widgets
+    )
     image_only = bool(page_count) and len(scanned_pages) == page_count
     structure_root = _resolve(struct_root)
     has_parent_tree = isinstance(structure_root, DictionaryObject) and structure_root.get("/ParentTree") is not None
@@ -389,26 +492,47 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         findings.append(_finding(check_id, category, name, status, severity, details, remediation, pages, source))
 
     add("ACR-DOC-001", "Document", "Accessibility permission flag", "pass" if accessibility_allowed else "fail", "high", "The document permits assistive-technology text and graphics extraction." if accessibility_allowed else "The encrypted document does not grant assistive-technology extraction permission.", "Remove security restrictions that prevent assistive-technology access.")
-    add("ACR-DOC-002", "Document", "Image-only PDF", "fail" if image_only else "pass", "critical", f"All {page_count} page(s) are image-only." if image_only else "The document is not entirely image-only.", "Run OCR and verify the recognized text and reading order.", scanned_pages or None)
+    add("ACR-DOC-002", "Document", "Image-only PDF", "not_applicable" if not image_count else ("fail" if image_only else "pass"), "critical", f"All {page_count} page(s) are image-only." if image_only else (f"Found {image_count} image object(s), and extractable text is also present." if image_count else "No image objects were detected; image-only testing does not apply."), "Run OCR and verify the recognized text and reading order.", scanned_pages or None)
     add("ACR-DOC-003", "Document", "Tagged PDF", "pass" if fully_tagged else "fail", "critical", "The catalog identifies a tagged document with a structure tree." if fully_tagged else "The document lacks a complete tagged-document declaration and structure tree.", "Create and validate a semantic structure tree.")
-    add("ACR-DOC-004", "Document", "Logical Reading Order", "manual", "critical", "Reading-order quality requires human and assistive-technology review.", "Verify the tag order against the intended visual and spoken order.")
-    add("ACR-DOC-005", "Document", "Primary language", "pass" if language else "fail", "high", f"Document language is {language}." if language else "No default document language is declared.", "Set the document language and identify language changes.")
+    add("ACR-DOC-004", "Document", "Logical Reading Order", "out_of_scope", "critical", "Reading-order quality requires semantic and assistive-technology review.", "Verify the tag order against the intended visual and spoken order.")
+    if detected_language is None:
+        language_status = "out_of_scope"
+        language_details = "Insufficient extractable text was available for reliable deterministic language detection."
+    elif not language:
+        language_status = "fail"
+        language_details = f"No default language is declared; detected {detected_language[0]} with confidence {detected_language[1]:.2f}."
+    elif not language_valid:
+        language_status = "fail"
+        language_details = f"Declared language '{language}' is not a valid supported BCP 47 tag."
+    elif not language_matches:
+        language_status = "fail"
+        language_details = f"Declared language '{language}' does not match detected {detected_language[0]} ({detected_language[1]:.2f})."
+    else:
+        language_status = "pass"
+        language_details = f"Declared language '{language}' matches detected {detected_language[0]} ({detected_language[1]:.2f})."
+    add("ACR-DOC-005", "Document", "Primary language", language_status, "high", language_details, "Set a valid BCP 47 document language that matches the document text.")
     add("ACR-DOC-006", "Document", "Title", "pass" if meaningful_title and display_title else "fail", "medium", f"Meaningful metadata title is '{title}' and title display is enabled." if meaningful_title and display_title else ("The metadata title is generic or duplicates the filename." if title and not meaningful_title else "A meaningful metadata title and title-bar display preference are both required."), "Add a meaningful title and display it in the title bar.")
-    add("ACR-DOC-007", "Document", "Bookmarks", "not_applicable" if page_count < 10 else ("pass" if outline_count else "fail"), "medium", f"Found {outline_count} bookmark(s)." if outline_count else ("Fewer than 10 pages; this rule does not apply." if page_count < 10 else "No bookmarks were found in this long document."), "Add hierarchical bookmarks for major sections.")
-    add("ACR-DOC-008", "Document", "Color contrast", "manual", "high", "Static PDF inspection cannot reliably establish visual contrast for all content.", "Measure foreground/background contrast and correct failures.", source=SOURCE_REQUIREMENTS["contrast"])
+    has_tagged_headings = any(role.startswith("H") and role[1:].isdigit() for role, _, _ in roles)
+    add("ACR-DOC-007", "Document", "Tagged headings", "not_applicable" if page_count == 1 else ("pass" if has_tagged_headings else "fail"), "medium", "Tagged headings provide bypass navigation." if has_tagged_headings else ("This is a single-page PDF; bypass-block testing does not apply." if page_count == 1 else f"No tagged headings were found in this multi-page document; {outline_count} bookmark(s) were inventoried separately."), "Add a valid tagged heading structure for multi-page documents.")
+    add("ACR-DOC-008", "Document", "Color contrast", "out_of_scope", "high", "Static object inspection cannot reliably establish rendered visual contrast.", "Measure foreground/background contrast using a qualified rendering process.", source=SOURCE_REQUIREMENTS["contrast"])
 
     add("ACR-PAGE-001", "Page Content", "Tagged content", "pass" if len(tagged_pages) == page_count and page_count else "fail", "critical", f"All {page_count} page(s) have marked content." if len(tagged_pages) == page_count and page_count else f"Marked-content coverage was verified on {len(tagged_pages)} of {page_count} page(s).", "Associate meaningful page content with structure elements and mark layout content as artifacts.")
-    add("ACR-PAGE-002", "Page Content", "Tagged annotations", "pass" if len(tagged_annotations) == len(annotations) else "fail", "high", f"{len(tagged_annotations)} of {len(annotations)} annotation(s) are structure-associated." if annotations else "No annotations require tagging.", "Associate each meaningful annotation with the structure tree.")
-    add("ACR-PAGE-003", "Page Content", "Tab order", "pass" if len(tabs_pages) == page_count and page_count else "fail", "high", f"All {page_count} page(s) use structure order." if len(tabs_pages) == page_count and page_count else f"Structure-based tab order is set on {len(tabs_pages)} of {page_count} page(s).", "Set page tab order to use the document structure.")
-    add("ACR-PAGE-004", "Page Content", "Character encoding", "fail" if extraction_errors else "manual", "high", "Text extraction failed on one or more pages." if extraction_errors else "Text extraction completed, but valid Unicode mappings and text accuracy require object-level or assistive-technology verification.", "Use embedded Unicode-compatible fonts and valid character mappings, then verify extracted text against the visible document.", extraction_errors or None)
-    add("ACR-PAGE-005", "Page Content", "Tagged multimedia", "pass" if not media or all(item.get("/StructParent") is not None for item in media) else "fail", "medium", f"Found {len(media)} multimedia annotation(s)." if media else "No multimedia objects require tagging.", "Tag multimedia and provide accessible alternatives.")
-    add("ACR-PAGE-006", "Page Content", "Screen flicker", "manual" if media or has_scripts else "pass", "high", "Dynamic content requires manual flicker testing." if media or has_scripts else "No dynamic multimedia or scripts were detected.", "Verify that dynamic content does not flash above accessibility thresholds.")
-    add("ACR-PAGE-007", "Page Content", "Scripts", "manual" if has_scripts else "pass", "high", "Scripts are present and require keyboard and assistive-technology testing." if has_scripts else "No document-level or page-level scripts were detected.", "Remove inaccessible scripts or provide an accessible equivalent.")
-    add("ACR-PAGE-008", "Page Content", "Timed responses", "manual" if has_scripts else "pass", "high", "Scripts may impose timing and require manual testing." if has_scripts else "No scripts capable of imposing timed responses were detected.", "Allow users to extend, disable, or avoid time limits.")
-    add("ACR-PAGE-009", "Page Content", "Navigation links", "manual" if links else "pass", "medium", f"Found {len(links)} link annotation(s); repetition and purpose require review." if links else "No link annotations require repetition review.", "Verify link purpose and remove unnecessarily repetitive navigation.")
+    add("ACR-PAGE-002", "Page Content", "Tagged annotations", "not_applicable" if not annotations else ("pass" if len(tagged_annotations) == len(annotations) else "fail"), "high", f"{len(tagged_annotations)} of {len(annotations)} annotation(s) are structure-associated." if annotations else "No annotations were detected; annotation tagging does not apply.", "Associate each meaningful annotation with the structure tree.")
+    focusable = links + widgets
+    add("ACR-PAGE-003", "Page Content", "Tab order", "not_applicable" if not focusable else ("pass" if len(tabs_pages) == page_count and fully_tagged else "fail"), "high", f"All {page_count} page(s) use valid structure order." if focusable and len(tabs_pages) == page_count and fully_tagged else ("No focusable annotations were detected; tab-order testing does not apply." if not focusable else f"Structure-based tab order is set on {len(tabs_pages)} of {page_count} page(s), tagged={fully_tagged}."), "Set page tab order to use a valid document structure.")
+    add("ACR-PAGE-004", "Page Content", "Character encoding", "fail" if extraction_errors else "out_of_scope", "high", "Text extraction failed on one or more pages." if extraction_errors else "Text extraction completed, but Unicode mapping accuracy requires an independent validator or assistive-technology review.", "Use embedded Unicode-compatible fonts and valid character mappings.", extraction_errors or None)
+    add("ACR-PAGE-005", "Page Content", "Tagged multimedia", "not_applicable" if not media else ("pass" if all(item.get("/StructParent") is not None for item in media) else "fail"), "medium", f"Found {len(media)} multimedia annotation(s)." if media else "No multimedia objects were detected; multimedia tagging does not apply.", "Tag multimedia and provide accessible alternatives.")
+    add("ACR-PAGE-006", "Page Content", "Screen flicker", "out_of_scope" if media or has_scripts else "not_applicable", "high", "Dynamic content is present; flash-threshold testing requires playback analysis." if media or has_scripts else "No dynamic multimedia or scripts were detected; flash testing does not apply.", "Verify dynamic content with a qualified playback-analysis process.")
+    add("ACR-PAGE-007", "Page Content", "Scripts and keyboard behavior", "out_of_scope" if has_scripts else "not_applicable", "high", "Scripts are present and require interactive keyboard testing." if has_scripts else "No scripts were detected; script keyboard testing does not apply.", "Remove inaccessible scripts or provide an accessible equivalent.")
+    add("ACR-PAGE-008", "Page Content", "Timed responses", "out_of_scope" if has_scripts or media else "not_applicable", "high", "Dynamic content may impose timing and requires interactive testing." if has_scripts or media else "No scripts or media capable of imposing timed responses were detected.", "Allow users to extend, disable, or avoid time limits.")
+    link_missing_text = [
+        item for item in links
+        if not (_text(item.get("/Contents")) or _text(item.get("/TU")))
+    ]
+    add("ACR-PAGE-009", "Page Content", "Link purpose", "not_applicable" if not links else ("fail" if link_missing_text else "pass"), "medium", f"Found {len(links)} link annotation(s); {len(link_missing_text)} lack accessible contents." if links else "No link annotations were detected; link-purpose testing does not apply.", "Provide meaningful link contents or tagged link text.")
 
-    add("ACR-FORM-001", "Forms", "Tagged form fields", "pass" if not widgets or all(item.get("/StructParent") is not None for item in widgets) else "fail", "high", f"Found {len(widgets)} form widget(s)." if widgets else "No form widgets require tagging.", "Associate each form widget with a Form structure element.", source=SOURCE_REQUIREMENTS["keyboard"])
-    add("ACR-FORM-002", "Forms", "Field descriptions", "pass" if not missing_descriptions else "fail", "high", f"Found {len(fields)} field(s); {len(missing_descriptions)} lack a tooltip or field name." if fields else "No form fields require descriptions.", "Give every form control a unique descriptive tooltip or name.", source=SOURCE_REQUIREMENTS["keyboard"])
+    add("ACR-FORM-001", "Forms", "Tagged form fields", "not_applicable" if not widgets else ("pass" if all(item.get("/StructParent") is not None for item in widgets) else "fail"), "high", f"Found {len(widgets)} form widget(s)." if widgets else "No form widgets were detected; form tagging does not apply.", "Associate each form widget with a Form structure element.", source=SOURCE_REQUIREMENTS["keyboard"])
+    add("ACR-FORM-002", "Forms", "Field descriptions", "not_applicable" if not field_count else ("pass" if not missing_descriptions else "fail"), "high", f"Found {field_count} field(s); {len(missing_descriptions)} lack an inherited non-empty /TU tooltip." if field_count else "No form fields were detected; field descriptions do not apply.", "Give every form control a unique descriptive /TU tooltip.", source=SOURCE_REQUIREMENTS["keyboard"])
 
     alt_elements = [element for _, element, _ in roles if _text(element.get("/Alt")) or _text(element.get("/ActualText"))]
     nested_alt = [element for element in alt_elements if any(_text(child.get("/Alt")) or _text(child.get("/ActualText")) for child in _walk_structure(element.get("/K")))]
@@ -416,10 +540,10 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     alt_hiding_annotation = [element for element in alt_elements if _contains_object_reference(element.get("/K"))]
     other_alt_missing = [element for role, element, _ in roles if role in {"Formula", "Form"} and not (_text(element.get("/Alt")) or _text(element.get("/ActualText")))]
     add("ACR-ALT-001", "Alternate Text", "Figures alternate text", "not_applicable" if not figures and not image_count else ("pass" if figures and not figures_without_alt else "fail"), "high", f"Found {len(figures)} tagged figure(s); {len(figures_without_alt)} lack alternate text." if figures else f"Found {image_count} image object(s) without verifiable Figure tags.", "Add concise equivalent text to informative figures and artifact decorative images.", source=SOURCE_REQUIREMENTS["alt"])
-    add("ACR-ALT-002", "Alternate Text", "Nested alternate text", "fail" if nested_alt else "pass", "medium", f"Found {len(nested_alt)} element(s) with nested alternate text." if nested_alt else "No nested alternate-text conflicts were detected.", "Keep alternate text on the appropriate outermost semantic element.", source=SOURCE_REQUIREMENTS["alt"])
-    add("ACR-ALT-003", "Alternate Text", "Associated with content", "fail" if alt_without_content else "pass", "high", f"Found {len(alt_without_content)} alternate-text element(s) without associated content." if alt_without_content else "Every detected alternate-text entry is associated with content.", "Associate alternate text with actual marked content.", source=SOURCE_REQUIREMENTS["alt"])
-    add("ACR-ALT-004", "Alternate Text", "Hides annotation", "fail" if alt_hiding_annotation else "pass", "high", f"Found {len(alt_hiding_annotation)} alternate-text element(s) containing annotation references." if alt_hiding_annotation else "No alternate text was found hiding annotation references.", "Move annotation objects outside alternate-text containers.", source=SOURCE_REQUIREMENTS["alt"])
-    add("ACR-ALT-005", "Alternate Text", "Other elements alternate text", "fail" if other_alt_missing else "pass", "high", f"Found {len(other_alt_missing)} non-Figure element(s) missing alternate text." if other_alt_missing else "No other tagged elements were found missing required alternate text.", "Add equivalent text to formulas and other non-text semantic elements.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-002", "Alternate Text", "Nested alternate text", "not_applicable" if not alt_elements else ("fail" if nested_alt else "pass"), "medium", f"Found {len(nested_alt)} element(s) with nested alternate text." if alt_elements else "No alternate-text elements were detected; nested-alt testing does not apply.", "Keep alternate text on the appropriate outermost semantic element.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-003", "Alternate Text", "Associated with content", "not_applicable" if not alt_elements else ("fail" if alt_without_content else "pass"), "high", f"Found {len(alt_without_content)} alternate-text element(s) without associated content." if alt_elements else "No alternate-text elements were detected; association testing does not apply.", "Associate alternate text with actual marked content.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-004", "Alternate Text", "Hides annotation", "not_applicable" if not alt_elements else ("fail" if alt_hiding_annotation else "pass"), "high", f"Found {len(alt_hiding_annotation)} alternate-text element(s) containing annotation references." if alt_elements else "No alternate-text elements were detected; annotation-hiding testing does not apply.", "Move annotation objects outside alternate-text containers.", source=SOURCE_REQUIREMENTS["alt"])
+    add("ACR-ALT-005", "Alternate Text", "Other elements alternate text", "not_applicable" if not any(role in {"Formula", "Form"} for role, _, _ in roles) else ("fail" if other_alt_missing else "pass"), "high", f"Found {len(other_alt_missing)} non-Figure element(s) missing alternate text." if any(role in {"Formula", "Form"} for role, _, _ in roles) else "No Formula or Form structure elements were detected; this check does not apply.", "Add equivalent text to formulas and other non-text semantic elements.", source=SOURCE_REQUIREMENTS["alt"])
 
     table_roles = [(role, element, parent) for role, element, parent in roles if role in {"Table", "THead", "TBody", "TFoot", "TR", "TH", "TD"}]
     tables = [element for role, element, _ in table_roles if role == "Table"]
@@ -429,8 +553,8 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     add("ACR-TABLE-001", "Tables", "Rows", "not_applicable" if not tables else ("fail" if invalid_rows else "pass"), "high", f"Found {len(tables)} table(s) and {len(invalid_rows)} invalid row parent(s)." if tables else "No tagged tables were detected.", "Place each TR under Table, THead, TBody, or TFoot.")
     add("ACR-TABLE-002", "Tables", "TH and TD", "not_applicable" if not tables else ("fail" if invalid_cells else "pass"), "high", f"Found {len(invalid_cells)} cell(s) outside TR elements." if tables else "No tagged tables were detected.", "Place each TH and TD directly under a TR.")
     add("ACR-TABLE-003", "Tables", "Headers", "not_applicable" if not tables else ("pass" if header_count else "fail"), "high", f"Found {header_count} table header cell(s)." if tables else "No tagged tables were detected.", "Add TH cells and valid header associations.")
-    add("ACR-TABLE-004", "Tables", "Regularity", "not_applicable" if not tables else "manual", "high", "No tagged tables were detected." if not tables else "Spans and row/column regularity require semantic table analysis.", "Verify consistent rows, columns, spans, and header associations.")
-    add("ACR-TABLE-005", "Tables", "Summary", "not_applicable" if not tables else "skipped", "low", "No tagged tables were detected." if not tables else "Table-summary quality is not automatically evaluated.", "Add a summary when needed to explain a complex table.")
+    add("ACR-TABLE-004", "Tables", "Regularity", "not_applicable" if not tables else "out_of_scope", "high", "No tagged tables were detected." if not tables else "Spans and row/column regularity require semantic table analysis.", "Verify consistent rows, columns, spans, and header associations.")
+    add("ACR-TABLE-005", "Tables", "Summary", "not_applicable" if not tables else "out_of_scope", "low", "No tagged tables were detected." if not tables else "Table-summary quality requires semantic analysis and is not mapped to an automated WCAG result.", "Add a summary when needed to explain a complex table.")
 
     lists = [element for role, element, _ in roles if role == "L"]
     invalid_items = [element for role, element, parent in roles if role == "LI" and parent != "L"]
@@ -442,16 +566,41 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     heading_skip = any(current > previous + 1 for previous, current in zip(heading_levels, heading_levels[1:]))
     add("ACR-HEAD-001", "Headings", "Appropriate nesting", "not_applicable" if not heading_levels else ("fail" if heading_skip else "pass"), "high", f"Heading sequence: {', '.join(f'H{level}' for level in heading_levels)}." if heading_levels else "No tagged headings were detected.", "Use descriptive headings with levels that do not skip illogically.")
 
+    evidence: dict[str, int | float | str | bool] = {
+        "pages": page_count,
+        "text_pages": page_count - len(no_text_pages),
+        "image_only_pages": len(scanned_pages),
+        "images": image_count,
+        "figures": len(figures),
+        "annotations": len(annotations),
+        "links": len(links),
+        "widgets": len(widgets),
+        "fields": field_count,
+        "scripts": int(has_scripts),
+        "media": len(media),
+        "dynamic_content": len(media) + int(has_scripts) + form_actions + embedded_files,
+        "interactive_controls": len(links) + len(widgets) + int(has_scripts),
+        "fields_or_actions": field_count + form_actions,
+        "form_actions": form_actions,
+        "embedded_files": embedded_files,
+        "tables": len(tables),
+        "lists": len(lists),
+        "headings": len(heading_levels),
+        "bookmarks": outline_count,
+        "declared_language": language,
+        "detected_language": detected_language[0] if detected_language else "",
+        "language_confidence": detected_language[1] if detected_language else 0,
+    }
     score = _calculate_score(findings)
     rating = "Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected"
-    summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "warning", "manual", "skipped", "not_applicable")}
-    wcag_results = build_wcag_results(findings)
+    summary = {status: sum(item.status == status for item in findings) for status in ("pass", "fail", "not_applicable", "out_of_scope")}
+    wcag_results = build_wcag_results(findings, evidence)
     wcag_summary = summarize_wcag(wcag_results)
     return AuditReport(
         schema_version=AUDIT_SCHEMA_VERSION,
         checker_version=CHECKER_VERSION,
         ruleset_version=RULESET_VERSION,
-        file=str(path),
+        file=path.name,
         source_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         generated_at=datetime.now(timezone.utc).isoformat(),
         page_count=page_count,
@@ -466,6 +615,7 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
             "The source document references WCAG 2.1 Level AA and Section 508 in its title and executive summary.",
         ],
         disclaimer=DISCLAIMER,
+        evidence=evidence,
         summary=summary,
         findings=findings,
         wcag_standard=WCAG_STANDARD,
@@ -476,10 +626,10 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
 
 
 def _calculate_score(findings: list[Finding]) -> int:
-    automated = [item for item in findings if item.status not in {"manual", "skipped", "not_applicable"}]
+    automated = [item for item in findings if item.status in {"pass", "fail"}]
     possible = sum(WEIGHTS[item.severity] for item in automated)
     earned = sum(
-        WEIGHTS[item.severity] * ({"pass": 1.0, "warning": 0.5, "fail": 0.0}[item.status])
+        WEIGHTS[item.severity] * (1.0 if item.status == "pass" else 0.0)
         for item in automated
     )
     return round(100 * earned / possible) if possible else 0
@@ -497,14 +647,20 @@ def read_json(input_path: str | Path) -> AuditReport:
     path = Path(input_path).expanduser().resolve()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("schema_version") != AUDIT_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported schema version: {data.get('schema_version')}")
         findings = [Finding(**item) for item in data.pop("findings")]
         wcag_results = [
-            WcagResult(**{**item, "check_ids": tuple(item["check_ids"])})
+            WcagResult(**{
+                **item,
+                "check_ids": tuple(item["check_ids"]),
+                "techniques": tuple(item["techniques"]),
+            })
             for item in data.pop("wcag_results")
         ]
         return AuditReport(findings=findings, wcag_results=wcag_results, **data)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid audit JSON report: {path}") from exc
+        raise ValueError(f"Invalid audit JSON report: {path}: {exc}") from exc
 
 
 def write_html(
@@ -517,9 +673,13 @@ def write_html(
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     e = html.escape
-    labels = {"pass": "Pass", "fail": "Fail", "warning": "Warning", "manual": "Manual review", "skipped": "Skipped", "not_applicable": "N/A"}
+    labels = {"pass": "Pass", "fail": "Fail", "not_applicable": "N/A", "out_of_scope": "Out of scope"}
+    evidence_rows = "".join(
+        f"<tr><th scope=\"row\">{e(key.replace('_', ' ').title())}</th><td>{e(str(value))}</td></tr>"
+        for key, value in report.evidence.items()
+    )
     wcag_rows = "".join(
-        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td>{e(item.applicability.replace('_', ' ').title())}</td><td>{e(item.test_method)}</td><td><span class="result-label result-{e(item.status)}">{e(WCAG_STATUS_LABELS[item.status])}</span></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td>{e(item.applicability.replace('_', ' ').title())}</td><td>{e(item.test_method)}</td><td><span class="result-label result-{e(item.status)}">{e(WCAG_STATUS_LABELS[item.status])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
         for item in report.wcag_results
     )
     rows = []
@@ -557,25 +717,25 @@ def write_html(
 <body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
 <main id="main-content" class="container"><article class="audit-dashboard">
 <header class="report-hero"><p class="report-eyebrow">PDF accessibility audit</p><h2>Audit dashboard</h2><p class="file">File: <strong>{e(report.file)}</strong></p></header>
-<nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#wcag">WCAG coverage</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
+<nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#evidence">Evidence</a><a href="#wcag">WCAG coverage</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
 <div class="report-content">
 <section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>
 <div class="report-kpis">
 <div class="report-card report-kpi"><strong>{report.score}/100</strong><span>Automated accessibility score</span></div>
 <div class="report-card report-kpi"><strong>{report.page_count}</strong><span>Pages</span></div>
 <div class="report-card report-kpi fail"><strong>{report.summary['fail']}</strong><span>Failures</span></div>
-<div class="report-card report-kpi warning"><strong>{report.summary['warning']}</strong><span>Warnings</span></div>
-<div class="report-card report-kpi manual"><strong>{report.summary['manual']}</strong><span>Manual checks</span></div>
-</div><div class="report-card status-banner"><strong>WCAG conformance determination</strong>{e(report.wcag_determination)}. Automated results do not establish WCAG conformance without the required manual and assistive-technology review.</div></section>
+<div class="report-card report-kpi manual"><strong>{report.summary['out_of_scope']}</strong><span>Out-of-scope checks</span></div>
+<div class="report-card report-kpi"><strong>{report.summary['not_applicable']}</strong><span>Not applicable</span></div>
+</div><div class="report-card status-banner"><strong>WCAG automated determination</strong>{e(report.wcag_determination)}. Automated results do not establish full WCAG conformance.</div></section>
+<section id="evidence" class="report-section" aria-labelledby="evidence-heading"><h3 id="evidence-heading">Document evidence inventory</h3><div class="report-card"><table class="policy-table"><tbody>{evidence_rows}</tbody></table></div></section>
 <section id="wcag" class="report-section" aria-labelledby="wcag-heading"><h3 id="wcag-heading">{e(report.wcag_standard)} coverage</h3>
 <div class="report-kpis">
 <div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
-<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('manual', 0)}</strong><span>Manual verification</span></div>
-<div class="report-card report-kpi warning"><strong>{report.wcag_summary.get('not_tested', 0)}</strong><span>Not tested</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('out_of_scope', 0)}</strong><span>Out of scope</span></div>
 <div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Applicability</th><th scope="col">Test method</th><th scope="col">Audit result</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Applicability</th><th scope="col">Test method</th><th scope="col">Audit result</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
 </section>
 {remediation_panel}
 <section id="evaluation" class="report-section" aria-labelledby="evaluation-heading"><h3 id="evaluation-heading">Evaluation basis</h3>
@@ -613,7 +773,7 @@ def main() -> int:
         return 1
 
     print(f"Accessibility score: {report.score}/100 — {report.rating}")
-    print(f"Failures: {report.summary['fail']}; warnings: {report.summary['warning']}; manual reviews: {report.summary['manual']}")
+    print(f"Failures: {report.summary['fail']}; out of scope: {report.summary['out_of_scope']}; not applicable: {report.summary['not_applicable']}")
     print(f"HTML report: {html_path}")
     print(f"JSON report: {json_path}")
     if not args.no_open:

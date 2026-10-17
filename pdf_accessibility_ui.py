@@ -137,10 +137,9 @@ button:disabled { background: #9aa3ad; cursor: not-allowed; }
 .policy-table tbody tr:nth-child(even) { background: #f7f9fc; }
 .policy-table code { font-size: .82rem; }
 .result-label { display: inline-block; padding: .16rem .5rem; border-radius: 999px; font-size: .74rem; font-weight: 800; }
-.result-pass, .result-automatically_remediated, .result-already_passed, .result-verified_pass { color: #0f5a39; background: #d9f3e7; }
+.result-pass, .result-automatically_remediated, .result-already_passed { color: #0f5a39; background: #d9f3e7; }
 .result-fail, .result-not_remediated { color: #841d19; background: #fde3e1; }
-.result-manual, .result-manual_review { color: #503078; background: #eee4fa; }
-.result-not_tested { color: #674c00; background: #fff0cb; }
+.result-out_of_scope { color: #503078; background: #eee4fa; }
 .result-not_applicable { color: #44546a; background: #e8edf4; }
 .checkpoint-list { margin: 0; padding: 0; list-style: none; }
 .checkpoint-list li { display: grid; grid-template-columns: minmax(170px, .65fr) minmax(110px, .35fr) minmax(260px, 1fr); gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--color-border); }
