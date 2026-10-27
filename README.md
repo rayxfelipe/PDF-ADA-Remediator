@@ -175,19 +175,21 @@ The staging/pilot App Service is available at:
 
 The deployed standalone browser workflow runs `pdf_accessibility_workflow.py` from the immutable container image:
 
-- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag5-5f3e1b7`
-- Digest: `sha256:97493b7c6bcd4c8f426a440c498db7486439c5c7f788bf44e81a43873a21afe0`
-- Checker version: `2.2.0`
-- Ruleset version: `2026.10.2`
-- Audit schema: `5`
+- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag6-8e0c1a9`
+- Digest: `sha256:f929ade6a2cedbcfdaa03286fa9dbf195a0c3bb429fa5e0790a26e51c4d0db64`
+- Checker version: `2.3.0`
+- Ruleset version: `2026.10.3`
+- Audit schema: `6`
 
-Release validation completed on October 16, 2026:
+Release validation completed on October 27, 2026:
 
-- 20 unit and integration tests passed.
+- 24 unit and integration tests passed.
 - All 42 external source PDFs passed two-run audit, WCAG matrix, source-hash, output-hash, and reported-hash repeatability checks.
 - All 76 tagged-set records passed the same repeatability and hash checks.
 - The production container built and ran as the non-root `app` user.
-- Live health, audit, remediation, and remediated-PDF download checks returned HTTP 200.
+- Live health, audit, remediation, and remediated-PDF download checks succeeded.
+- The live report exposes checker `2.3.0`, ruleset `2026.10.3`, additional-review coverage, and corrected missing-language failures.
+- A PDF exactly at the 20 MB payload limit was accepted; a PDF one byte over the limit returned HTTP 413.
 
 The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
 
@@ -204,9 +206,7 @@ The deployment uses the existing App Service managed identity for ACR access. No
 The Azure Functions workflow does not call or depend on another checker application. The current pilot endpoint above uses the standalone App Service workflow rather than this Functions entry point.
 Job blobs include an expiration timestamp and are covered by the storage lifecycle policy. Set `PDF_JOB_TTL_HOURS` to change the metadata timestamp; the deployed lifecycle policy remains the deletion authority.
 
-## Current development release
-
-The correction release in the working tree has not yet replaced the Azure image listed above:
+## Current release behavior
 
 - Checker version: `2.3.0`
 - Ruleset version: `2026.10.3`
