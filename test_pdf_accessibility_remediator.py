@@ -2,6 +2,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from pypdf import PdfReader, PdfWriter
@@ -26,13 +27,14 @@ from pdf_accessibility_audit import (
     write_html,
     write_json,
 )
-from pdf_accessibility_policy import WCAG_21_AA_CRITERIA
+from pdf_accessibility_policy import WCAG_21_AA_CRITERIA, build_wcag_results
 from pdf_accessibility_remediator import remediate_pdf, write_remediation_html
 from pdf_accessibility_workflow import (
     UPLOAD_PAGE,
     _attachment_header,
     _cleanup_expired_sessions,
     _parse_pdf_upload,
+    _read_limited_body,
     _valid_api_key,
     remediate_api_payload,
 )
@@ -102,7 +104,11 @@ def _text_writer(text: str, language: str | None = None) -> PdfWriter:
     return writer
 
 
-def _form_writer(tooltip: str | None, inherited: bool = False) -> PdfWriter:
+def _form_writer(
+    tooltip: str | None,
+    inherited: bool = False,
+    mapping_name: str | None = None,
+) -> PdfWriter:
     writer = _mixed_content_writer()
     page = writer.pages[0]
     widget = DictionaryObject({
@@ -122,11 +128,15 @@ def _form_writer(tooltip: str | None, inherited: bool = False) -> PdfWriter:
         })
         if tooltip is not None:
             parent[NameObject("/TU")] = TextStringObject(tooltip)
+        if mapping_name is not None:
+            parent[NameObject("/TM")] = TextStringObject(mapping_name)
         parent_ref = writer._add_object(parent)
         widget[NameObject("/Parent")] = parent_ref
         field_ref = parent_ref
     elif tooltip is not None:
         widget[NameObject("/TU")] = TextStringObject(tooltip)
+    if not inherited and mapping_name is not None:
+        widget[NameObject("/TM")] = TextStringObject(mapping_name)
     page[NameObject("/Annots")] = ArrayObject([widget_ref])
     writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
         NameObject("/Fields"): ArrayObject([field_ref]),
@@ -144,9 +154,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
             first = audit_pdf(source)
             second = audit_pdf(source)
 
-        self.assertEqual(first.schema_version, 5)
-        self.assertEqual(first.checker_version, "2.2.0")
-        self.assertEqual(first.ruleset_version, "2026.10.2")
+        self.assertEqual(first.schema_version, 6)
+        self.assertEqual(first.checker_version, "2.3.0")
+        self.assertEqual(first.ruleset_version, "2026.10.3")
         self.assertEqual(first.file, "source.pdf")
         self.assertEqual(first.source_sha256, second.source_sha256)
         self.assertEqual(first.summary, second.summary)
@@ -175,9 +185,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
                 read_json(incompatible)
             old_schema = root / "old-schema.json"
             payload = json.loads(report_path.read_text(encoding="utf-8"))
-            payload["schema_version"] = 4
+            payload["schema_version"] = 5
             old_schema.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Unsupported schema version: 4"):
+            with self.assertRaisesRegex(ValueError, "Unsupported schema version: 5"):
                 read_json(old_schema)
 
         self.assertEqual(loaded.source_sha256, original.source_sha256)
@@ -233,6 +243,68 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(matching_status.status, "pass")
         self.assertEqual(mismatching_status.status, "fail")
         self.assertEqual(short_status.status, "out_of_scope")
+
+    def test_missing_or_invalid_language_fails_without_detection_evidence(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            missing = root / "missing.pdf"
+            invalid = root / "invalid.pdf"
+            with missing.open("wb") as stream:
+                _text_writer("Short text").write(stream)
+            with invalid.open("wb") as stream:
+                _text_writer("Short text", "not_a_language").write(stream)
+
+            missing_finding = next(
+                item for item in audit_pdf(missing).findings
+                if item.check_id == "ACR-DOC-005"
+            )
+            invalid_finding = next(
+                item for item in audit_pdf(invalid).findings
+                if item.check_id == "ACR-DOC-005"
+            )
+
+        self.assertEqual(missing_finding.status, "fail")
+        self.assertIn("No default language", missing_finding.details)
+        self.assertEqual(invalid_finding.status, "fail")
+        self.assertIn("not a valid", invalid_finding.details)
+
+    def test_mapped_wcag_outcome_is_not_erased_by_review_coverage(self) -> None:
+        findings = [
+            SimpleNamespace(check_id="ACR-DOC-003", status="pass"),
+            SimpleNamespace(check_id="ACR-PAGE-001", status="pass"),
+            SimpleNamespace(check_id="ACR-PAGE-002", status="not_applicable"),
+            SimpleNamespace(check_id="ACR-FORM-001", status="not_applicable"),
+            SimpleNamespace(check_id="ACR-TABLE-001", status="pass"),
+            SimpleNamespace(check_id="ACR-TABLE-002", status="pass"),
+            SimpleNamespace(check_id="ACR-TABLE-003", status="pass"),
+            SimpleNamespace(check_id="ACR-TABLE-004", status="out_of_scope"),
+            SimpleNamespace(check_id="ACR-LIST-001", status="not_applicable"),
+            SimpleNamespace(check_id="ACR-LIST-002", status="not_applicable"),
+            SimpleNamespace(check_id="ACR-HEAD-001", status="not_applicable"),
+        ]
+
+        result = next(
+            item for item in build_wcag_results(findings, {"tables": 1})
+            if item.criterion == "1.3.1"
+        )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.coverage, "additional_review")
+
+    def test_pdf_validity_has_a_machine_result_and_review_coverage(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "valid.pdf"
+            with source.open("wb") as stream:
+                _mixed_content_writer().write(stream)
+
+            report = audit_pdf(source)
+
+        finding = next(item for item in report.findings if item.check_id == "ACR-DOC-009")
+        criterion = next(item for item in report.wcag_results if item.criterion == "4.1.1")
+        self.assertEqual(finding.status, "pass")
+        self.assertEqual(criterion.status, "pass")
+        self.assertEqual(criterion.coverage, "additional_review")
+        self.assertGreater(report.wcag_summary["additional_review"], 0)
 
     def test_preserves_meaningful_title_and_enables_title_display(self) -> None:
         with TemporaryDirectory() as folder:
@@ -308,6 +380,29 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(missing.status, "fail")
         self.assertEqual(described.status, "pass")
 
+    def test_remediation_propagates_existing_form_mapping_names(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "form.pdf"
+            output = root / "form-remediated.pdf"
+            with source.open("wb") as stream:
+                _form_writer(None, mapping_name="Account number").write(stream)
+
+            report = remediate_pdf(source, output)
+            fields = PdfReader(output).get_fields() or {}
+
+        self.assertEqual(next(iter(fields.values()))["/TU"], "Account number")
+        action = next(
+            item for item in report.actions
+            if item.action_id == "propagate-form-tooltips"
+        )
+        self.assertEqual(action.result, "verified")
+        finding = next(
+            item for item in report.after_audit.findings
+            if item.check_id == "ACR-FORM-002"
+        )
+        self.assertEqual(finding.status, "pass")
+
     def test_absent_content_is_not_reported_as_pass(self) -> None:
         with TemporaryDirectory() as folder:
             source = Path(folder) / "plain.pdf"
@@ -333,7 +428,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(statuses["ACR-DOC-004"], "out_of_scope")
         self.assertEqual(statuses["ACR-DOC-008"], "out_of_scope")
         wcag_statuses = {item.status for item in report.wcag_results}
-        self.assertEqual(wcag_statuses, {"fail", "not_applicable", "out_of_scope"})
+        self.assertEqual(wcag_statuses, {"pass", "fail", "not_applicable", "out_of_scope"})
 
     def test_score_excludes_not_applicable_and_out_of_scope_checks(self) -> None:
         with TemporaryDirectory() as folder:
@@ -501,6 +596,13 @@ class AccessibilityRemediationTests(unittest.TestCase):
             _parse_pdf_upload("application/pdf", b"%PDF-1.7")
         self.assertEqual(raised.exception.status_code, 400)
 
+        oversized = BytesIO(b"x" * 12)
+        with self.assertRaises(PdfInputError) as raised:
+            _read_limited_body(oversized, content_length=12, limit=8)
+        self.assertEqual(raised.exception.status_code, 413)
+        self.assertEqual(oversized.tell(), 12)
+        self.assertEqual(_read_limited_body(BytesIO(b"12345678"), 8, 8), b"12345678")
+
         with TemporaryDirectory() as folder:
             owned = Path(folder) / "owned.pdf"
             preserved = Path(folder) / "preserved.pdf"
@@ -549,7 +651,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
             self.assertTrue(result["python_version"])
             self.assertTrue(result["pypdf_version"])
             self.assertEqual(result["langdetect_version"], "1.0.9")
-            self.assertEqual(result["checker_version"], "2.2.0")
+            self.assertEqual(result["checker_version"], "2.3.0")
             self.assertEqual(saved["rows"][0]["file"], "sample.pdf")
             self.assertTrue((outputs / "sample.pdf.json").is_file())
             self.assertTrue((outputs / "corpus-summary.csv").is_file())

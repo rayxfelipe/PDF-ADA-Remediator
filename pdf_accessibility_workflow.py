@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from io import BufferedIOBase
 import os
 import secrets
 import sys
@@ -20,8 +21,9 @@ from pdf_accessibility_audit import PdfInputError, REMEDIATION_REPORTS_DIR, Audi
 from pdf_accessibility_remediator import RemediationReport, remediate_pdf, write_remediation_html
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
-MAX_PDF_BYTES = 20 * 1024 * 1024
+MAX_PDF_BYTES = int(os.getenv("PDF_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
+REQUEST_READ_CHUNK_BYTES = 64 * 1024
 
 UPLOAD_PAGE = f"""<!doctype html>
 <html lang="en">
@@ -35,7 +37,7 @@ UPLOAD_PAGE = f"""<!doctype html>
 <main id="main-content" class="container">
 <section class="upload-card" aria-labelledby="upload-heading">
 <h2 id="upload-heading">Upload a PDF document</h2>
-<p class="hint">Screen a PDF against the supported accessibility requirements, review the findings, and apply safe automatic remediation. The original is processed temporarily and is not retained.</p>
+<p class="hint">Screen a PDF against the supported accessibility requirements, review the findings, and apply safe automatic remediation. Maximum size: {MAX_PDF_BYTES // (1024 * 1024)} MB. The original is processed temporarily and is not retained.</p>
 <form id="upload" method="post" action="/upload-pdf" enctype="multipart/form-data">
 <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-hint">
 <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF file to audit" required>
@@ -49,11 +51,12 @@ UPLOAD_PAGE = f"""<!doctype html>
 </section></main>{app_footer()}
 <script>
 const form=document.getElementById('upload'),dropzone=document.getElementById('dropzone'),input=document.getElementById('pdf'),button=document.getElementById('submit'),fileName=document.getElementById('file-name'),status=document.getElementById('status');
-input.addEventListener('change',event=>{{const file=event.target.files[0];if(file){{fileName.textContent='Selected: '+file.name;button.disabled=false;}}}});
+function selectFile(file){{if(!file)return;if(file.size>{MAX_PDF_BYTES}){{fileName.textContent='File exceeds the {MAX_PDF_BYTES // (1024 * 1024)} MB size limit.';button.disabled=true;input.value='';return;}}fileName.textContent='Selected: '+file.name;button.disabled=false;}}
+input.addEventListener('change',event=>selectFile(event.target.files[0]));
 dropzone.addEventListener('keydown',event=>{{if(event.key==='Enter'||event.key===' '){{event.preventDefault();input.click();}}}});
 ['dragenter','dragover'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.add('dragover');}}));
 ['dragleave','drop'].forEach(name=>dropzone.addEventListener(name,event=>{{event.preventDefault();dropzone.classList.remove('dragover');}}));
-dropzone.addEventListener('drop',event=>{{const file=event.dataTransfer.files[0];if(!file)return;const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;fileName.textContent='Selected: '+file.name;button.disabled=false;}});
+dropzone.addEventListener('drop',event=>{{const file=event.dataTransfer.files[0];if(!file)return;const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;selectFile(file);}});
 form.addEventListener('submit',()=>{{button.disabled=true;status.hidden=false;}});
 </script></body></html>"""
 
@@ -84,6 +87,29 @@ def _parse_pdf_upload(content_type: str, body: bytes) -> tuple[str, bytes]:
     if not payload.startswith(b"%PDF-"):
         raise PdfInputError("The uploaded file is not a valid PDF.", 400)
     return filename, payload
+
+
+def _read_limited_body(stream: BufferedIOBase, content_length: int, limit: int) -> bytes:
+    if content_length <= 0:
+        raise PdfInputError("A request body is required.", 400)
+
+    total = 0
+    with tempfile.SpooledTemporaryFile(max_size=min(limit, 2 * 1024 * 1024)) as body:
+        remaining = content_length
+        while remaining:
+            chunk = stream.read(min(REQUEST_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise PdfInputError("The request body ended before Content-Length bytes were received.", 400)
+            remaining -= len(chunk)
+            available = max(0, limit - total)
+            if available:
+                body.write(chunk[:available])
+            total += len(chunk)
+
+        if total > limit:
+            raise PdfInputError(f"The request body exceeds the {limit}-byte limit.", 413)
+        body.seek(0)
+        return body.read()
 
 
 def prepare_audit(
@@ -327,15 +353,15 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             except ValueError:
                 self.send_error(400, "Invalid content length")
                 return
-            if content_length <= 0:
-                self.send_error(400, "A request body is required")
+            try:
+                body = _read_limited_body(
+                    self.rfile,
+                    content_length,
+                    MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES,
+                )
+            except PdfInputError as exc:
+                self.send_error(exc.status_code, str(exc))
                 return
-            if content_length > MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES:
-                self.send_error(413, "Upload is too large")
-                self.close_connection = True
-                return
-
-            body = self.rfile.read(content_length)
             if route == "/api/remediate":
                 try:
                     pdf_name, pdf_bytes = _parse_pdf_upload(self.headers.get("Content-Type", ""), body)

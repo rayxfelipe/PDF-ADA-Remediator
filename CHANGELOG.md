@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Separate each mapped WCAG automated result from its coverage completeness so additional-review limitations no longer erase deterministic passes or failures.
+- Add partial-coverage deterministic checks for strict PDF structural parsing (WCAG 4.1.1) and declared structure-element language tags (WCAG 3.1.2).
+- Expand safe remediation to populate missing form `/TU` tooltips from existing `/TM` or `/Contents` values only when every missing tooltip has a source value.
+- Raise the deterministic contract to audit schema 6, checker 2.3.0, and ruleset 2026.10.3.
 - Classify every WCAG 2.1 Level A/AA criterion as pass, fail, not applicable, or out of scope instead of using ambiguous manual/not-tested states.
 - Add a document evidence inventory and criterion-level policy rationales with relevant W3C PDF technique identifiers.
 - Exclude not-applicable and out-of-scope checks from the automated accessibility score.
@@ -39,6 +43,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Return a deterministic failure for missing or invalid document `/Lang` before evaluating whether text-language detection is conclusive.
+- Prefer mapped pass/fail outcomes over out-of-scope subchecks while retaining the limitation as additional-review coverage.
+- Read request bodies in bounded chunks, drain oversized uploads without retaining them, and return HTTP 413 instead of closing the connection early.
+- Reject oversized files in the standalone browser before upload and make the 20 MB limit configurable with `PDF_MAX_UPLOAD_BYTES`.
+- Set structure-based tab order only for an applicable failed tab-order check, not for a not-applicable check.
 - Interpret `/MarkInfo /Marked = false` as false instead of relying on `BooleanObject` truthiness.
 - Do not accept generic metadata such as `PowerPoint Presentation` as a meaningful document title.
 - Reject empty structure trees and marked content without valid structure-element mappings.

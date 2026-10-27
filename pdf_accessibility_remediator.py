@@ -91,6 +91,72 @@ def _resolve(value: Any) -> Any:
     return value
 
 
+def _field_text(value: Any) -> str:
+    value = _resolve(value)
+    return str(value).strip() if value is not None else ""
+
+
+def _inherited_field_text(value: Any, key: str) -> str:
+    visited: set[tuple[int, int]] = set()
+    while value is not None:
+        if isinstance(value, IndirectObject):
+            reference = (value.idnum, value.generation)
+            if reference in visited:
+                return ""
+            visited.add(reference)
+        field = _resolve(value)
+        if not isinstance(field, DictionaryObject):
+            return ""
+        text = _field_text(field.get(key))
+        if text:
+            return text
+        value = field.get("/Parent")
+    return ""
+
+
+def _form_fields(root: DictionaryObject) -> list[DictionaryObject]:
+    acro_form = _resolve(root.get("/AcroForm"))
+    fields = _resolve(acro_form.get("/Fields")) if isinstance(acro_form, DictionaryObject) else None
+    if not isinstance(fields, (list, tuple)):
+        return []
+
+    results: list[DictionaryObject] = []
+    visited: set[tuple[int, int]] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, IndirectObject):
+            reference = (value.idnum, value.generation)
+            if reference in visited:
+                return
+            visited.add(reference)
+        field = _resolve(value)
+        if not isinstance(field, DictionaryObject):
+            return
+        if field.get("/FT") is not None:
+            results.append(field)
+        kids = _resolve(field.get("/Kids"))
+        if isinstance(kids, (list, tuple)):
+            for child in kids:
+                visit(child)
+
+    for field in fields:
+        visit(field)
+    return results
+
+
+def _tooltip_candidates(root: DictionaryObject) -> tuple[int, list[tuple[DictionaryObject, str]]]:
+    missing = 0
+    candidates: list[tuple[DictionaryObject, str]] = []
+    for field in _form_fields(root):
+        if _inherited_field_text(field, "/TU"):
+            continue
+        missing += 1
+        candidate = _field_text(field.get("/TM")) or _field_text(field.get("/Contents"))
+        if len(candidate) >= 2:
+            candidates.append((field, candidate))
+    return missing, candidates
+
+
 def _build_remediation_plan(
     reader: PdfReader,
     before: AuditReport,
@@ -129,13 +195,27 @@ def _build_remediation_plan(
             "true",
         ))
 
-    if findings["ACR-DOC-003"].status == "pass" and findings["ACR-PAGE-003"].status != "pass":
+    if findings["ACR-DOC-003"].status == "pass" and findings["ACR-PAGE-003"].status == "fail":
         actions.append(_PlannedAction(
             "set-structure-tab-order",
             "ACR-PAGE-003",
             "/Pages/*/Tabs",
             None,
             "/S",
+        ))
+
+    missing_tooltips, tooltip_candidates = _tooltip_candidates(root)
+    if (
+        findings["ACR-FORM-002"].status == "fail"
+        and missing_tooltips
+        and len(tooltip_candidates) == missing_tooltips
+    ):
+        actions.append(_PlannedAction(
+            "propagate-form-tooltips",
+            "ACR-FORM-002",
+            "/AcroForm/Fields/*/TU",
+            f"{missing_tooltips} missing",
+            f"{missing_tooltips} populated from existing /TM or /Contents values",
         ))
     return actions
 
@@ -154,6 +234,10 @@ def _apply_plan(writer: PdfWriter, plan: list[_PlannedAction]) -> None:
         elif action.action_id == "set-structure-tab-order":
             for page in writer.pages:
                 page[NameObject("/Tabs")] = NameObject("/S")
+        elif action.action_id == "propagate-form-tooltips":
+            _, candidates = _tooltip_candidates(root)
+            for field, tooltip in candidates:
+                field[NameObject("/TU")] = TextStringObject(tooltip)
         else:
             raise ValueError(f"Unsupported remediation action: {action.action_id}")
 
@@ -253,11 +337,11 @@ def remediate_pdf(
         {"stage": "Pre-remediation audit", "status": "Complete", "details": f"{before.summary.get('fail', 0)} deterministic failures; {before.summary.get('out_of_scope', 0)} out-of-scope checks"},
         {"stage": "Automatic remediation", "status": "Complete", "details": f"{len(actions)} safe action(s) applied and verified"},
         {"stage": "Post-remediation audit", "status": "Complete", "details": f"SHA-256 {output_sha256}; {after.summary.get('fail', 0)} deterministic failures remain"},
-        {"stage": "Out-of-scope criteria", "status": "Disclosed" if wcag_summary.get("out_of_scope", 0) else "None", "details": f"{wcag_summary.get('out_of_scope', 0)} criteria require capabilities beyond this automated application"},
+        {"stage": "Additional-review coverage", "status": "Disclosed" if wcag_summary.get("additional_review", 0) else "None", "details": f"{wcag_summary.get('additional_review', 0)} criteria require review beyond their automated result"},
         {"stage": "WCAG 2.1 AA determination", "status": "Incomplete" if determination.startswith("Incomplete") else "Ready for review", "details": determination},
     ]
     return RemediationReport(
-        schema_version=5,
+        schema_version=6,
         source_file=source.name,
         source_sha256=source_sha256,
         remediated_file=destination.name,
@@ -311,7 +395,7 @@ def write_remediation_html(
         for item in report.checkpoints
     )
     wcag_rows = "".join(
-        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td>{e(item.coverage.replace('_', ' ').title())}</td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
         for item in report.wcag_results
     )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
@@ -337,9 +421,10 @@ def write_remediation_html(
 <div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
 <div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('out_of_scope', 0)}</strong><span>Out of scope</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('additional_review', 0)}</strong><span>Additional review</span></div>
 <div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Completion</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Coverage</th><th scope="col">Completion</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
 </section>
 <section id="actions" class="report-section" aria-labelledby="actions-heading"><h3 id="actions-heading">Verified actions</h3><div class="report-card action"><ul>{action_rows}</ul></div></section>
 <section id="verification" class="report-section" aria-labelledby="verification-heading"><h3 id="verification-heading">Verification identity</h3>

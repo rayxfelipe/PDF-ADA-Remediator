@@ -44,13 +44,14 @@ Every remediation report includes:
 - Policy rationale and relevant W3C PDF technique identifiers
 - Pre- and post-remediation checkpoints
 - Four result states: pass, fail, not applicable, and out of scope
+- Separate automated-result and coverage fields so an additional-review limitation cannot erase a deterministic pass or failure
 - An automated determination that remains incomplete while deterministic failures remain and separately identifies out-of-scope coverage
 
 The numerical result is labeled an **automated accessibility score**. It measures the deterministic checks implemented by this application and must not be interpreted as a WCAG compliance percentage.
 
 ## Scope
 
-The checker reports 32 Acrobat-aligned accessibility rule areas covering:
+The checker reports 34 Acrobat-aligned and deterministic validation rule areas covering:
 
 - Document properties
 - Page content and navigation
@@ -59,6 +60,8 @@ The checker reports 32 Acrobat-aligned accessibility rule areas covering:
 - Tables
 - Lists
 - Heading nesting
+- Strict PDF structural parsing
+- Declared language changes in structure elements
 
 The rules are independently implemented with `pypdf`. They do not invoke or reproduce Adobe's proprietary checker, so results can differ where Adobe uses undocumented logic.
 
@@ -67,6 +70,7 @@ The remediator currently applies only these deterministic changes:
 - Set or correct the default document language only when repeatable text-language evidence is sufficiently strong.
 - Enable title display when a meaningful title already exists.
 - Set structure-based page tab order when the existing structure tree passes local validation.
+- Propagate an existing form mapping name (`/TM`) or widget contents value into a missing tooltip (`/TU`) only when every missing tooltip has a source value.
 
 The remediator does not:
 
@@ -159,6 +163,7 @@ The local workflow exposes `POST /api/remediate`. The request uses `multipart/fo
 - `pdf`: source PDF, up to 20 MB
 
 The endpoint audits, remediates, and verifies the PDF locally. It returns the remediated file as `application/pdf`.
+The request body is read in bounded chunks. Oversized request bodies are consumed without being retained and return HTTP 413 consistently; the browser also rejects files above the configured limit before upload. Set `PDF_MAX_UPLOAD_BYTES` to change the default 20 MB limit.
 
 Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` request header. Leaving the setting empty is suitable only for local development.
 
@@ -198,6 +203,29 @@ The deployment uses the existing App Service managed identity for ACR access. No
 
 The Azure Functions workflow does not call or depend on another checker application. The current pilot endpoint above uses the standalone App Service workflow rather than this Functions entry point.
 Job blobs include an expiration timestamp and are covered by the storage lifecycle policy. Set `PDF_JOB_TTL_HOURS` to change the metadata timestamp; the deployed lifecycle policy remains the deletion authority.
+
+## Current development release
+
+The correction release in the working tree has not yet replaced the Azure image listed above:
+
+- Checker version: `2.3.0`
+- Ruleset version: `2026.10.3`
+- Audit schema: `6`
+- Missing or invalid document `/Lang` values fail even when language detection is inconclusive.
+- Mapped deterministic WCAG results are reported independently from additional-review coverage.
+- Strict PDF structural parsing contributes a partial-coverage machine result for WCAG 4.1.1.
+- Declared structure-element language tags contribute a partial-coverage machine result for WCAG 3.1.2.
+- Visual and semantic criteria remain out of scope when the application lacks a reliable renderer, OCR comparison, passage detector, or visible-label association; they are not relabeled as passing.
+
+Validation completed on October 27, 2026:
+
+- 24 unit and integration tests passed.
+- Pylance reported no diagnostics in the modified production modules.
+- Python compilation and Azure Function import checks passed.
+- The production container ran as the non-root `app` user.
+- Container health returned HTTP 200.
+- A PDF exactly at the 20 MB payload limit returned HTTP 303 after audit; a PDF one byte over the limit returned HTTP 413.
+- All 42 external source PDFs and all 76 tagged-set records passed the two-run repeatability and hash gates with zero errors.
 
 ## Deterministic behavior
 
@@ -242,14 +270,18 @@ python -m unittest -v
 
 The tests cover:
 
-- Stable 32-rule output
+- Stable 34-rule output
 - Repeated deterministic audits
 - Source hashing and contract versions
-- Language match, mismatch, insufficient-evidence, and remediation behavior
+- Language match, mismatch, missing/invalid declaration precedence, insufficient-evidence, and remediation behavior
 - Meaningful-title handling
 - Placeholder and filename-like title rejection
 - Correct not-applicable and out-of-scope classification
 - Inherited form-field `/TU` validation
+- Safe `/TM` or `/Contents` to `/TU` propagation with post-remediation verification
+- Separation of automated WCAG outcomes from additional-review coverage
+- Strict PDF structural-validation results
+- Exact and oversized upload-body handling
 - Typed empty, corrupt, truncated, encrypted, and zero-page PDF errors
 - Session expiration and application-owned output cleanup
 - External corpus JSON/CSV and repeatability output

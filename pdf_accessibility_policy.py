@@ -27,6 +27,7 @@ class WcagResult:
     applicability: str
     test_method: str
     status: str
+    coverage: str
     check_ids: tuple[str, ...]
     rationale: str
     techniques: tuple[str, ...]
@@ -41,6 +42,7 @@ class WcagComparison:
     test_method: str
     before_status: str
     after_status: str
+    coverage: str
     completion: str
     check_ids: tuple[str, ...]
     rationale: str
@@ -110,6 +112,8 @@ RULE_WCAG_MAP = {
     "ACR-DOC-006": ("2.4.2",),
     "ACR-DOC-007": ("2.4.1",),
     "ACR-DOC-008": ("1.4.3",),
+    "ACR-DOC-009": ("4.1.1",),
+    "ACR-DOC-010": ("3.1.2",),
     "ACR-PAGE-001": ("1.3.1", "1.3.2"),
     "ACR-PAGE-002": ("1.3.1", "4.1.2"),
     "ACR-PAGE-003": ("2.1.1", "2.4.3"),
@@ -136,6 +140,8 @@ RULE_WCAG_MAP = {
 RULE_TEST_METHOD = {
     "ACR-DOC-004": "Manual",
     "ACR-DOC-008": "Manual",
+    "ACR-DOC-009": "Mixed",
+    "ACR-DOC-010": "Mixed",
     "ACR-PAGE-004": "Mixed",
     "ACR-PAGE-006": "Mixed",
     "ACR-PAGE-007": "Mixed",
@@ -200,7 +206,7 @@ WCAG_POLICY = {
     "2.5.3": ("out_of_scope_if", "interactive_controls", "Visible-label comparison requires rendered text-to-control association.", ()),
     "2.5.4": ("out_of_scope_if", "interactive_controls", "Motion-actuation behavior requires interactive execution.", ()),
     "3.1.1": ("mapped", "", "The declared BCP 47 language can be compared with deterministic text-language evidence.", ("PDF16",)),
-    "3.1.2": ("out_of_scope_if", "text_pages", "Detecting and validating every language change requires passage-level semantic analysis.", ("PDF19",)),
+    "3.1.2": ("mapped", "", "Declared structure-element language changes can be validated, while detecting omitted changes still requires passage-level review.", ("PDF19",)),
     "3.2.1": ("out_of_scope_if", "interactive_controls", "Changes on focus require interactive execution.", ()),
     "3.2.2": ("out_of_scope_if", "interactive_controls", "Changes on input require interactive execution.", ()),
     "3.2.3": ("not_applicable", "", "Consistent navigation applies across a set of documents or pages, not one stand-alone PDF.", ()),
@@ -209,7 +215,7 @@ WCAG_POLICY = {
     "3.3.2": ("mapped", "", "Form fields can be checked for inherited non-empty tooltips.", ("PDF10",)),
     "3.3.3": ("out_of_scope_if", "fields_or_actions", "Error-suggestion adequacy requires form execution and semantic review.", ()),
     "3.3.4": ("out_of_scope_if", "fields_or_actions", "Error-prevention behavior requires transactional form execution.", ()),
-    "4.1.1": ("out_of_scope", "", "Full PDF syntax and structure validity requires an independent PDF validator.", ()),
+    "4.1.1": ("mapped", "", "Strict parsing detects deterministic structural failures; an independent validator is still required for complete coverage.", ()),
     "4.1.2": ("mapped", "", "Widgets, links, tags, and accessible names provide machine-testable name-role-value evidence.", ("PDF10", "PDF12")),
     "4.1.3": ("out_of_scope_if", "dynamic_content", "Status-message behavior requires interactive execution and assistive-technology observation.", ()),
 }
@@ -224,12 +230,12 @@ def _aggregate_status(statuses: list[str]) -> str:
         return "out_of_scope"
     if "fail" in statuses:
         return "fail"
-    if "out_of_scope" in statuses:
-        return "out_of_scope"
     if "pass" in statuses:
         return "pass"
     if all(status == "not_applicable" for status in statuses):
         return "not_applicable"
+    if "out_of_scope" in statuses:
+        return "out_of_scope"
     return "out_of_scope"
 
 
@@ -255,8 +261,8 @@ def build_wcag_results(
     for item in WCAG_21_AA_CRITERIA:
         check_ids = _criterion_rule_ids(item.criterion)
         mode, evidence_key, rationale, techniques = WCAG_POLICY[item.criterion]
-        if mode == "mapped":
-            statuses = [findings_by_id[check_id].status for check_id in check_ids if check_id in findings_by_id]
+        statuses = [findings_by_id[check_id].status for check_id in check_ids if check_id in findings_by_id]
+        if statuses:
             status = _aggregate_status(statuses)
         elif mode == "not_applicable":
             status = "not_applicable"
@@ -264,6 +270,17 @@ def build_wcag_results(
             status = "out_of_scope"
         else:
             status = "out_of_scope" if evidence.get(evidence_key, 0) else "not_applicable"
+        if status == "not_applicable":
+            coverage = "not_applicable"
+        elif (
+            status == "out_of_scope"
+            or mode != "mapped"
+            or any(value == "out_of_scope" for value in statuses)
+            or _test_method(check_ids) != "Automated"
+        ):
+            coverage = "additional_review"
+        else:
+            coverage = "complete"
         applicability = status if status in {"not_applicable", "out_of_scope"} else "applicable"
         results.append(WcagResult(
             item.criterion,
@@ -272,6 +289,7 @@ def build_wcag_results(
             applicability,
             _test_method(check_ids),
             status,
+            coverage,
             check_ids,
             rationale,
             techniques,
@@ -281,10 +299,13 @@ def build_wcag_results(
 
 def summarize_wcag(results: Iterable[WcagResult]) -> dict[str, int]:
     items = list(results)
-    return {
+    summary = {
         status: sum(item.status == status for item in items)
         for status in ("pass", "fail", "not_applicable", "out_of_scope")
     }
+    summary["complete_coverage"] = sum(item.coverage == "complete" for item in items)
+    summary["additional_review"] = sum(item.coverage == "additional_review" for item in items)
+    return summary
 
 
 def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> list[WcagComparison]:
@@ -312,6 +333,7 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
             updated.test_method,
             original.status,
             updated.status,
+            updated.coverage,
             completion,
             updated.check_ids,
             updated.rationale,
@@ -323,6 +345,6 @@ def compare_wcag(before: Iterable[WcagResult], after: Iterable[WcagResult]) -> l
 def wcag_determination(summary: dict[str, int]) -> str:
     if summary.get("fail", 0):
         return "Incomplete — deterministic failures remain"
-    if summary.get("out_of_scope", 0):
-        return "Passes all automated checks — out-of-scope criteria remain"
+    if summary.get("out_of_scope", 0) or summary.get("additional_review", 0):
+        return "Passes all automated checks — additional-review coverage remains"
     return "Passes all automated WCAG 2.1 A/AA checks"

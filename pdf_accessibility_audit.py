@@ -65,12 +65,13 @@ class AuditReport:
 
 
 WEIGHTS = {"critical": 10, "high": 7, "medium": 4, "low": 1}
-AUDIT_SCHEMA_VERSION = 5
-CHECKER_VERSION = "2.2.0"
-RULESET_VERSION = "2026.10.2"
+AUDIT_SCHEMA_VERSION = 6
+CHECKER_VERSION = "2.3.0"
+RULESET_VERSION = "2026.10.3"
 ACROBAT_RULE_IDS = (
     "ACR-DOC-001", "ACR-DOC-002", "ACR-DOC-003", "ACR-DOC-004",
     "ACR-DOC-005", "ACR-DOC-006", "ACR-DOC-007", "ACR-DOC-008",
+    "ACR-DOC-009", "ACR-DOC-010",
     "ACR-PAGE-001", "ACR-PAGE-002", "ACR-PAGE-003", "ACR-PAGE-004",
     "ACR-PAGE-005", "ACR-PAGE-006", "ACR-PAGE-007", "ACR-PAGE-008",
     "ACR-PAGE-009", "ACR-FORM-001", "ACR-FORM-002", "ACR-ALT-001",
@@ -379,6 +380,18 @@ def _finding(
     return Finding(check_id, category, requirement, status, severity, details, remediation, pages, source_requirement)
 
 
+def _strict_pdf_validation(path: Path) -> tuple[bool, str]:
+    try:
+        reader = PdfReader(str(path), strict=True)
+        page_count = len(reader.pages)
+        root = _catalog(reader)
+        if not root:
+            return False, "Strict parsing found no valid document catalog."
+        return True, f"Strict parsing opened a valid catalog and {page_count} page(s)."
+    except (PdfReadError, PdfStreamError, EOFError, ValueError, TypeError) as exc:
+        return False, f"Strict parsing failed: {type(exc).__name__}: {exc}"
+
+
 def audit_pdf(pdf_path: str | Path) -> AuditReport:
     path = Path(pdf_path).expanduser().resolve()
     if not path.is_file():
@@ -465,6 +478,16 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         and detected_language
         and _language_primary(language) == detected_language[0]
     )
+    strict_pdf_valid, strict_pdf_details = _strict_pdf_validation(path)
+    structure_languages = [
+        _text(element.get("/Lang"))
+        for element, _ in nodes
+        if _text(element.get("/Lang"))
+    ]
+    invalid_structure_languages = [
+        value for value in structure_languages
+        if not BCP47_PATTERN.fullmatch(value)
+    ]
     names = _resolve(root.get("/Names"))
     embedded_files = _name_tree_count(names.get("/EmbeddedFiles")) if isinstance(names, DictionaryObject) else 0
     form_actions = sum(
@@ -495,15 +518,23 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     add("ACR-DOC-002", "Document", "Image-only PDF", "not_applicable" if not image_count else ("fail" if image_only else "pass"), "critical", f"All {page_count} page(s) are image-only." if image_only else (f"Found {image_count} image object(s), and extractable text is also present." if image_count else "No image objects were detected; image-only testing does not apply."), "Run OCR and verify the recognized text and reading order.", scanned_pages or None)
     add("ACR-DOC-003", "Document", "Tagged PDF", "pass" if fully_tagged else "fail", "critical", "The catalog identifies a tagged document with a structure tree." if fully_tagged else "The document lacks a complete tagged-document declaration and structure tree.", "Create and validate a semantic structure tree.")
     add("ACR-DOC-004", "Document", "Logical Reading Order", "out_of_scope", "critical", "Reading-order quality requires semantic and assistive-technology review.", "Verify the tag order against the intended visual and spoken order.")
-    if detected_language is None:
-        language_status = "out_of_scope"
-        language_details = "Insufficient extractable text was available for reliable deterministic language detection."
-    elif not language:
+    if not language:
         language_status = "fail"
-        language_details = f"No default language is declared; detected {detected_language[0]} with confidence {detected_language[1]:.2f}."
+        language_details = (
+            f"No default language is declared; detected {detected_language[0]} "
+            f"with confidence {detected_language[1]:.2f}."
+            if detected_language
+            else "No default language is declared, and there is insufficient text to infer one safely."
+        )
     elif not language_valid:
         language_status = "fail"
         language_details = f"Declared language '{language}' is not a valid supported BCP 47 tag."
+    elif detected_language is None:
+        language_status = "out_of_scope"
+        language_details = (
+            f"Declared language '{language}' is valid, but insufficient extractable text "
+            "was available to verify that it matches the document."
+        )
     elif not language_matches:
         language_status = "fail"
         language_details = f"Declared language '{language}' does not match detected {detected_language[0]} ({detected_language[1]:.2f})."
@@ -515,6 +546,23 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
     has_tagged_headings = any(role.startswith("H") and role[1:].isdigit() for role, _, _ in roles)
     add("ACR-DOC-007", "Document", "Tagged headings", "not_applicable" if page_count == 1 else ("pass" if has_tagged_headings else "fail"), "medium", "Tagged headings provide bypass navigation." if has_tagged_headings else ("This is a single-page PDF; bypass-block testing does not apply." if page_count == 1 else f"No tagged headings were found in this multi-page document; {outline_count} bookmark(s) were inventoried separately."), "Add a valid tagged heading structure for multi-page documents.")
     add("ACR-DOC-008", "Document", "Color contrast", "out_of_scope", "high", "Static object inspection cannot reliably establish rendered visual contrast.", "Measure foreground/background contrast using a qualified rendering process.", source=SOURCE_REQUIREMENTS["contrast"])
+    add("ACR-DOC-009", "Document", "PDF structural validity", "pass" if strict_pdf_valid else "fail", "high", strict_pdf_details, "Repair structural parsing errors and validate the result with an independent PDF validator.")
+    if invalid_structure_languages:
+        language_parts_status = "fail"
+        language_parts_details = (
+            f"Found {len(invalid_structure_languages)} invalid structure language tag(s): "
+            f"{', '.join(invalid_structure_languages)}."
+        )
+    elif structure_languages:
+        language_parts_status = "pass"
+        language_parts_details = f"Validated {len(structure_languages)} declared structure language tag(s)."
+    elif text_chunks:
+        language_parts_status = "out_of_scope"
+        language_parts_details = "No structure language changes are declared; omitted language changes require passage-level review."
+    else:
+        language_parts_status = "not_applicable"
+        language_parts_details = "No extractable text was available for language-of-parts testing."
+    add("ACR-DOC-010", "Document", "Language of parts", language_parts_status, "medium", language_parts_details, "Declare valid /Lang values on structure elements when the human language changes.")
 
     add("ACR-PAGE-001", "Page Content", "Tagged content", "pass" if len(tagged_pages) == page_count and page_count else "fail", "critical", f"All {page_count} page(s) have marked content." if len(tagged_pages) == page_count and page_count else f"Marked-content coverage was verified on {len(tagged_pages)} of {page_count} page(s).", "Associate meaningful page content with structure elements and mark layout content as artifacts.")
     add("ACR-PAGE-002", "Page Content", "Tagged annotations", "not_applicable" if not annotations else ("pass" if len(tagged_annotations) == len(annotations) else "fail"), "high", f"{len(tagged_annotations)} of {len(annotations)} annotation(s) are structure-associated." if annotations else "No annotations were detected; annotation tagging does not apply.", "Associate each meaningful annotation with the structure tree.")
@@ -590,6 +638,9 @@ def audit_pdf(pdf_path: str | Path) -> AuditReport:
         "declared_language": language,
         "detected_language": detected_language[0] if detected_language else "",
         "language_confidence": detected_language[1] if detected_language else 0,
+        "structure_language_tags": len(structure_languages),
+        "invalid_structure_language_tags": len(invalid_structure_languages),
+        "strict_pdf_valid": strict_pdf_valid,
     }
     score = _calculate_score(findings)
     rating = "Good automated result" if score >= 90 else "Needs review" if score >= 70 else "Significant barriers detected"
@@ -679,7 +730,7 @@ def write_html(
         for key, value in report.evidence.items()
     )
     wcag_rows = "".join(
-        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td>{e(item.applicability.replace('_', ' ').title())}</td><td>{e(item.test_method)}</td><td><span class="result-label result-{e(item.status)}">{e(WCAG_STATUS_LABELS[item.status])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td>{e(item.applicability.replace('_', ' ').title())}</td><td>{e(item.test_method)}</td><td><span class="result-label result-{e(item.status)}">{e(WCAG_STATUS_LABELS[item.status])}</span></td><td>{e(item.coverage.replace('_', ' ').title())}</td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
         for item in report.wcag_results
     )
     rows = []
@@ -699,7 +750,7 @@ def write_html(
         remediation_panel = f"""
 <section id="remediation" class="report-section report-card action" aria-labelledby="remediate-heading">
     <h3 id="remediate-heading">Apply automatic remediation?</h3>
-    <p>A new PDF will be created; the source file will not be changed. Safe language and title-display fixes will be applied when supported by the source document. OCR, alternate-text meaning, semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
+    <p>A new PDF will be created; the source file will not be changed. Safe language, title-display, structure tab-order, and existing form-label propagation fixes will be applied when supported by the source document. OCR, alternate-text meaning, semantic tagging, reading order, tables, and visual contrast require additional remediation or human review.</p>
     <form method="post" action="{html.escape(remediation_url, quote=True)}" onsubmit="return confirm('Create a remediated copy now? The original will not be overwritten.');">
         <input type="hidden" name="token" value="{html.escape(csrf_token, quote=True)}">
         <button type="submit">Yes, apply remediation</button>
@@ -733,9 +784,10 @@ def write_html(
 <div class="report-card report-kpi pass"><strong>{report.wcag_summary.get('pass', 0)}</strong><span>Criteria passed</span></div>
 <div class="report-card report-kpi fail"><strong>{report.wcag_summary.get('fail', 0)}</strong><span>Criteria failed</span></div>
 <div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('out_of_scope', 0)}</strong><span>Out of scope</span></div>
+<div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('additional_review', 0)}</strong><span>Additional review</span></div>
 <div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Applicability</th><th scope="col">Test method</th><th scope="col">Audit result</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Applicability</th><th scope="col">Test method</th><th scope="col">Automated result</th><th scope="col">Coverage</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
 </section>
 {remediation_panel}
 <section id="evaluation" class="report-section" aria-labelledby="evaluation-heading"><h3 id="evaluation-heading">Evaluation basis</h3>
