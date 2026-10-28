@@ -175,8 +175,8 @@ The staging/pilot App Service is available at:
 
 The deployed standalone browser workflow runs `pdf_accessibility_workflow.py` from the immutable container image:
 
-- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag6-8e0c1a9`
-- Digest: `sha256:f929ade6a2cedbcfdaa03286fa9dbf195a0c3bb429fa5e0790a26e51c4d0db64`
+- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag6-home-35516f0`
+- Digest: `sha256:4d7ef7575a4b5bc39b123aaa4d85abacd927b07276e4447152527231debbf2d6`
 - Checker version: `2.3.0`
 - Ruleset version: `2026.10.3`
 - Audit schema: `6`
@@ -190,6 +190,7 @@ Release validation completed on October 27, 2026:
 - Live health, audit, remediation, and remediated-PDF download checks succeeded.
 - The live report exposes checker `2.3.0`, ruleset `2026.10.3`, additional-review coverage, and corrected missing-language failures.
 - A PDF exactly at the 20 MB payload limit was accepted; a PDF one byte over the limit returned HTTP 413.
+- On October 28, the live top **Home / New upload** action was verified to clear the active session and return the same browser to a fresh upload page.
 
 The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
 
