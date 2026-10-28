@@ -525,7 +525,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
             with source.open("wb") as stream:
                 _mixed_content_writer().write(stream)
             result = remediate_pdf(source, output)
-            report_path = write_remediation_html(result, root / "result.html")
+            report_path = write_remediation_html(result, root / "result.html", home_url="/new")
             document = report_path.read_text(encoding="utf-8")
 
         self.assertIn("Deterministic remediation run complete", document)
@@ -539,6 +539,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("PDF18", document)
         self.assertIn("Source SHA-256", document)
         self.assertIn("Verified actions", document)
+        self.assertIn("Home / New upload", document)
+        self.assertEqual(document.count('href="/new"'), 2)
+        self.assertLess(document.index('href="/new"'), document.index('<nav class="report-nav"'))
         self.assertNotIn("Not tested by this application", document)
         self.assertNotIn("Imported checker", document)
         self.assertNotIn("third-party", document.lower())
@@ -562,7 +565,10 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("Rationale / techniques", document)
         self.assertNotIn("Upload remediation JSON file", document)
         self.assertNotIn("upload-remediation", document)
+        self.assertIn("Home / New upload", document)
         self.assertIn('href="/new">Home</a>', document)
+        self.assertEqual(document.count('href="/new"'), 2)
+        self.assertLess(document.index('href="/new"'), document.index('<nav class="report-nav"'))
 
     def test_deployed_workflow_uses_shared_dashboard_ui(self) -> None:
         self.assertIn("PDF Accessibility Checker and Remediator", UPLOAD_PAGE)

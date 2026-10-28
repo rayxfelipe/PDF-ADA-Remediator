@@ -758,6 +758,12 @@ def write_html(
 </section>"""
 
     home_link = f'<a class="button secondary" href="{e(home_url, quote=True)}">Home</a>' if home_url else ""
+    top_home_link = (
+        f'<div class="report-actions"><a class="button secondary" href="{e(home_url, quote=True)}" '
+        'aria-label="Home: start a new PDF upload">Home / New upload</a></div>'
+        if home_url
+        else ""
+    )
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -767,7 +773,7 @@ def write_html(
 </head>
 <body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
 <main id="main-content" class="container"><article class="audit-dashboard">
-<header class="report-hero"><p class="report-eyebrow">PDF accessibility audit</p><h2>Audit dashboard</h2><p class="file">File: <strong>{e(report.file)}</strong></p></header>
+<header class="report-hero"><p class="report-eyebrow">PDF accessibility audit</p><h2>Audit dashboard</h2><p class="file">File: <strong>{e(report.file)}</strong></p>{top_home_link}</header>
 <nav class="report-nav" aria-label="Audit report sections"><a href="#overview">Overview</a><a href="#evidence">Evidence</a><a href="#wcag">WCAG coverage</a><a href="#remediation">Remediation</a><a href="#evaluation">Evaluation basis</a><a href="#findings">Detailed findings</a></nav>
 <div class="report-content">
 <section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>

@@ -114,7 +114,7 @@ The workflow:
 7. Writes a remediated copy without overwriting the source.
 8. Rechecks the output and displays verified results.
 
-The browser interface uses a consistent, accessible dashboard across the upload, audit, and remediation steps. It includes drag-and-drop PDF selection, progress and error states, summary metrics, section navigation, detailed finding cards, verified before-and-after outcomes, and print or download actions. The shared presentation layer is defined in `pdf_accessibility_ui.py`; it does not restore any dependency on the retired external checker.
+The browser interface uses a consistent, accessible dashboard across the upload, audit, and remediation steps. It includes drag-and-drop PDF selection, progress and error states, summary metrics, section navigation, detailed finding cards, verified before-and-after outcomes, and print or download actions. Audit and remediation reports provide **Home / New upload** at the top and **Home** at the bottom; both use the session-reset route so a new PDF can be selected immediately. The shared presentation layer is defined in `pdf_accessibility_ui.py`; it does not restore any dependency on the retired external checker.
 
 Use `--no-open` to prevent the browser from opening automatically:
 

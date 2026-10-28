@@ -400,12 +400,18 @@ def write_remediation_html(
     )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
     home = f'<a class="button secondary" href="{e(home_url, quote=True)}">Home</a>' if home_url else ""
+    top_home = (
+        f'<div class="report-actions"><a class="button secondary" href="{e(home_url, quote=True)}" '
+        'aria-label="Home: start a new PDF upload">Home / New upload</a></div>'
+        if home_url
+        else ""
+    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PDF Remediation Results</title><style>{APP_STYLES}</style></head>
 <body>{app_header("PDF Accessibility Checker and Remediator", "Deterministic PDF audits and safe accessibility remediation")}
 <main id="main-content" class="container"><article class="audit-dashboard">
-<header class="report-hero"><p class="report-eyebrow">Deterministic remediation run complete</p><h2>Remediation dashboard</h2><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p></header>
+<header class="report-hero"><p class="report-eyebrow">Deterministic remediation run complete</p><h2>Remediation dashboard</h2><p class="file"><strong>Source:</strong> {e(report.source_file)}</p><p class="file"><strong>Output:</strong> {e(report.remediated_file)}</p>{top_home}</header>
 <nav class="report-nav" aria-label="Remediation report sections"><a href="#overview">Overview</a><a href="#checkpoints">Checkpoints</a><a href="#wcag">WCAG results</a><a href="#actions">Verified actions</a><a href="#verification">Verification</a><a href="#outcomes">Detailed outcomes</a></nav>
 <div class="report-content">
 <section id="overview" class="report-section" aria-labelledby="overview-heading"><h3 id="overview-heading">Overview</h3>

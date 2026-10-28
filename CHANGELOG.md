@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Add a prominent **Home / New upload** action to the top of audit and remediation reports while retaining the existing bottom Home action.
 - Separate each mapped WCAG automated result from its coverage completeness so additional-review limitations no longer erase deterministic passes or failures.
 - Add partial-coverage deterministic checks for strict PDF structural parsing (WCAG 4.1.1) and declared structure-element language tags (WCAG 3.1.2).
 - Expand safe remediation to populate missing form `/TU` tooltips from existing `/TM` or `/Contents` values only when every missing tooltip has a source value.
