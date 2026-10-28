@@ -182,22 +182,22 @@ The staging/pilot App Service is available at:
 
 The deployed standalone browser workflow runs `pdf_accessibility_workflow.py` from the immutable container image:
 
-- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:wcag6-home-35516f0`
-- Digest: `sha256:4d7ef7575a4b5bc39b123aaa4d85abacd927b07276e4447152527231debbf2d6`
-- Checker version: `2.3.0`
-- Ruleset version: `2026.10.3`
+- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:remed24-984700f`
+- Digest: `sha256:0524078121950c08a88335ba445f7e1f6fd755dd64397046087abf79a2f65eca`
+- Checker version: `2.4.0`
+- Ruleset version: `2026.10.4`
 - Audit schema: `6`
 
-Release validation completed on October 27, 2026:
+Release validation completed on October 28, 2026:
 
-- 24 unit and integration tests passed.
-- All 42 external source PDFs passed two-run audit, WCAG matrix, source-hash, output-hash, and reported-hash repeatability checks.
-- All 76 tagged-set records passed the same repeatability and hash checks.
+- 29 unit and integration tests passed.
+- All 42 external source PDFs passed two-run audit, WCAG matrix, source-hash, output-hash, and reported-hash repeatability checks with zero errors.
 - The production container built and ran as the non-root `app` user.
 - Live health, audit, remediation, and remediated-PDF download checks succeeded.
-- The live report exposes checker `2.3.0`, ruleset `2026.10.3`, additional-review coverage, and corrected missing-language failures.
-- A PDF exactly at the 20 MB payload limit was accepted; a PDF one byte over the limit returned HTTP 413.
-- On October 28, the live top **Home / New upload** action was verified to clear the active session and return the same browser to a fresh upload page.
+- The live report exposes checker `2.4.0`, ruleset `2026.10.4`, the complete checker-to-remediator matrix, and no-regression/idempotence checkpoints.
+- Live evidence-backed repairs set `/Marked = true` for an existing complete structure and normalized `en_US` to `en-US`; the downloaded PDF reopened successfully.
+- Live uploads at 21 MB throttled, 25 MB, 40 MB, and 50 MB returned explicit HTTP 413 responses with no 502s.
+- The live top **Home / New upload** action cleared the active session and returned the same browser to a fresh upload page.
 
 The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
 
