@@ -38,6 +38,9 @@ Every remediation report includes:
 - Before and after summaries
 - Planned and verified actions
 - Rule-level outcomes
+- A checker-to-remediator coverage inventory for all 34 deterministic checks
+- Explicit automatic, evidence-dependent, manual/external, prohibited, already-passing, and not-applicable remediation classifications
+- The evidence missing from each unfixed item and the human action required
 - Explicit out-of-scope outcomes
 - A complete WCAG 2.1 Level A/AA coverage matrix
 - Explicit mappings from WCAG criteria to deterministic application checks
@@ -71,6 +74,10 @@ The remediator currently applies only these deterministic changes:
 - Enable title display when a meaningful title already exists.
 - Set structure-based page tab order when the existing structure tree passes local validation.
 - Propagate an existing form mapping name (`/TM`) or widget contents value into a missing tooltip (`/TU`) only when every missing tooltip has a source value.
+- Set `/MarkInfo /Marked` only when a structure tree, parent tree, and existing structure elements already prove that the document is tagged.
+- Normalize invalid structure-element language tags only when their language identity is unambiguous, such as `en_US` to `en-US`.
+
+Every remediation run rejects an output if the page count changes, an existing deterministic pass regresses, an applied action does not verify as passing, or a second remediation plan would make additional changes. When no safe action is available, the source bytes are copied unchanged.
 
 The remediator does not:
 
@@ -209,24 +216,27 @@ Job blobs include an expiration timestamp and are covered by the storage lifecyc
 
 ## Current release behavior
 
-- Checker version: `2.3.0`
-- Ruleset version: `2026.10.3`
+- Checker version: `2.4.0`
+- Ruleset version: `2026.10.4`
 - Audit schema: `6`
 - Missing or invalid document `/Lang` values fail even when language detection is inconclusive.
 - Mapped deterministic WCAG results are reported independently from additional-review coverage.
 - Strict PDF structural parsing contributes a partial-coverage machine result for WCAG 4.1.1.
 - Declared structure-element language tags contribute a partial-coverage machine result for WCAG 3.1.2.
+- Remediation reports classify every deterministic check and state why automation is unavailable, what evidence is missing, and what a human should do.
+- Existing complete structure metadata can be declared as tagged without generating structure, and unambiguous structure-language tags can be normalized without guessing.
+- Remediation verifies page-count preservation, no regression of existing passes, action success, and an empty second-pass plan.
 - Visual and semantic criteria remain out of scope when the application lacks a reliable renderer, OCR comparison, passage detector, or visible-label association; they are not relabeled as passing.
 
-Validation completed on October 27, 2026:
+Validation completed on October 28, 2026:
 
-- 24 unit and integration tests passed.
+- 29 unit and integration tests passed.
 - Pylance reported no diagnostics in the modified production modules.
 - Python compilation and Azure Function import checks passed.
-- The production container ran as the non-root `app` user.
-- Container health returned HTTP 200.
-- A PDF exactly at the 20 MB payload limit returned HTTP 303 after audit; a PDF one byte over the limit returned HTTP 413.
-- All 42 external source PDFs and all 76 tagged-set records passed the two-run repeatability and hash gates with zero errors.
+- Synthetic fixtures verify every supported remediation path without adding customer PDFs to the repository.
+- Generated slow request streams of 21, 25, 40, and 50 MB were fully drained in bounded chunks and rejected with HTTP 413.
+- Live Azure uploads of 21 MB (throttled to 4 MB/s), 25 MB, 40 MB, and 50 MB each returned an explicit HTTP 413 limit response with no proxy 502; App Service remained running and Resource Health remained available.
+- Evan's 42-file source manifest passed with zero errors: 42/42 repeatable audits, WCAG matrices, remediation output hashes, source hashes, and reported output-file hashes.
 
 ## Deterministic behavior
 
@@ -235,9 +245,11 @@ For identical PDF bytes and the same checker and ruleset versions:
 - Source SHA-256 remains identical.
 - Findings and summaries remain identical.
 - The same remediation plan is produced.
-- Repeated remediation produces the same logical PDF-object changes.
+- Independent remediation runs produce byte-identical outputs.
+- A second remediation pass produces no actions and preserves the first output byte for byte.
+- A no-action remediation preserves the source byte for byte.
 
-Generation timestamps differ, but repeated runs with the same runtime and dependency versions are expected to produce identical findings, WCAG matrices, remediation plans, and output hashes.
+Generation timestamps differ, but repeated runs with the same runtime and dependency versions produce identical findings, WCAG matrices, remediation plans, and output hashes.
 
 ## Run an external corpus regression
 

@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Add a complete checker-to-remediator coverage matrix that classifies all 34 deterministic checks and identifies missing evidence and required human actions.
+- Add no-regression and second-plan idempotence verification to every remediation run; no-action runs now preserve source bytes exactly.
+- Add evidence-backed repairs for an existing complete structure declaration and unambiguous structure-language tag normalization.
+- Raise the checker to 2.4.0 and the ruleset to 2026.10.4.
+- Add synthetic determinism, idempotence, no-regression, byte-preservation, coverage-matrix, and 21/25/40/50 MB slow-stream tests.
 - Add a prominent **Home / New upload** action to the top of audit and remediation reports while retaining the existing bottom Home action.
 - Separate each mapped WCAG automated result from its coverage completeness so additional-review limitations no longer erase deterministic passes or failures.
 - Add partial-coverage deterministic checks for strict PDF structural parsing (WCAG 4.1.1) and declared structure-element language tags (WCAG 3.1.2).

@@ -1,4 +1,4 @@
-from io import BytesIO
+from io import BufferedIOBase, BytesIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -144,6 +144,67 @@ def _form_writer(
     return writer
 
 
+def _structured_writer(
+    marked: bool,
+    structure_language: str | None = None,
+    focusable: bool = False,
+) -> PdfWriter:
+    writer = _mixed_content_writer()
+    if focusable:
+        link = DictionaryObject({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): ArrayObject([
+                NumberObject(0),
+                NumberObject(0),
+                NumberObject(40),
+                NumberObject(12),
+            ]),
+            NameObject("/Contents"): TextStringObject("Permit instructions"),
+        })
+        writer.pages[0][NameObject("/Annots")] = ArrayObject([
+            writer._add_object(link),
+        ])
+    element = DictionaryObject({
+        NameObject("/Type"): NameObject("/StructElem"),
+        NameObject("/S"): NameObject("/P"),
+        NameObject("/K"): NumberObject(0),
+    })
+    if structure_language is not None:
+        element[NameObject("/Lang")] = TextStringObject(structure_language)
+    element_ref = writer._add_object(element)
+    writer._root_object[NameObject("/MarkInfo")] = DictionaryObject({
+        NameObject("/Marked"): BooleanObject(marked),
+    })
+    writer._root_object[NameObject("/StructTreeRoot")] = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/StructTreeRoot"),
+        NameObject("/ParentTree"): writer._add_object(DictionaryObject()),
+        NameObject("/K"): element_ref,
+    }))
+    return writer
+
+
+class _GeneratedSlowStream(BufferedIOBase):
+    def __init__(self, size: int, chunk_size: int = 4096) -> None:
+        self.size = size
+        self.chunk_size = chunk_size
+        self.position = 0
+        self.max_requested = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        requested_size = -1 if size is None else size
+        self.max_requested = max(self.max_requested, requested_size)
+        if self.position >= self.size:
+            return b""
+        requested = self.size - self.position if requested_size < 0 else requested_size
+        length = min(requested, self.chunk_size, self.size - self.position)
+        self.position += length
+        return b"x" * length
+
+
 class AccessibilityRemediationTests(unittest.TestCase):
     def test_audit_is_versioned_hash_bound_and_repeatable(self) -> None:
         with TemporaryDirectory() as folder:
@@ -155,8 +216,8 @@ class AccessibilityRemediationTests(unittest.TestCase):
             second = audit_pdf(source)
 
         self.assertEqual(first.schema_version, 6)
-        self.assertEqual(first.checker_version, "2.3.0")
-        self.assertEqual(first.ruleset_version, "2026.10.3")
+        self.assertEqual(first.checker_version, "2.4.0")
+        self.assertEqual(first.ruleset_version, "2026.10.4")
         self.assertEqual(first.file, "source.pdf")
         self.assertEqual(first.source_sha256, second.source_sha256)
         self.assertEqual(first.summary, second.summary)
@@ -403,6 +464,113 @@ class AccessibilityRemediationTests(unittest.TestCase):
         )
         self.assertEqual(finding.status, "pass")
 
+    def test_remediation_declares_existing_structure_and_normalizes_languages(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "structured.pdf"
+            output = root / "structured-remediated.pdf"
+            with source.open("wb") as stream:
+                _structured_writer(False, "en_US").write(stream)
+
+            report = remediate_pdf(source, output)
+            remediated = PdfReader(output)
+            catalog = remediated.trailer["/Root"].get_object()
+            assert isinstance(catalog, DictionaryObject)
+            structure_root = catalog["/StructTreeRoot"].get_object()
+            mark_info = catalog["/MarkInfo"].get_object()
+            assert isinstance(structure_root, DictionaryObject)
+            assert isinstance(mark_info, DictionaryObject)
+            structure_element = structure_root["/K"].get_object()
+            marked_value = mark_info["/Marked"].get_object()
+            assert isinstance(structure_element, DictionaryObject)
+            assert isinstance(marked_value, BooleanObject)
+            marked = bool(marked_value.value)
+            language = str(structure_element["/Lang"])
+
+        self.assertTrue(marked)
+        self.assertEqual(language, "en-US")
+        actions = {item.action_id: item for item in report.actions}
+        self.assertEqual(actions["declare-existing-structure"].result, "verified")
+        self.assertEqual(actions["normalize-structure-languages"].result, "verified")
+        after = {item.check_id: item.status for item in report.after_audit.findings}
+        self.assertEqual(after["ACR-DOC-003"], "pass")
+        self.assertEqual(after["ACR-DOC-010"], "pass")
+
+    def test_remediation_sets_tab_order_only_for_existing_structure(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "focusable.pdf"
+            output = root / "focusable-remediated.pdf"
+            repeated_output = root / "focusable-repeated.pdf"
+            with source.open("wb") as stream:
+                _structured_writer(True, focusable=True).write(stream)
+
+            report = remediate_pdf(source, output)
+            repeated = remediate_pdf(output, repeated_output)
+            page = PdfReader(output).pages[0]
+            output_bytes = output.read_bytes()
+            repeated_bytes = repeated_output.read_bytes()
+
+        self.assertEqual(page["/Tabs"], "/S")
+        action = next(
+            item for item in report.actions
+            if item.action_id == "set-structure-tab-order"
+        )
+        self.assertEqual(action.result, "verified")
+        self.assertFalse(repeated.actions)
+        self.assertEqual(output_bytes, repeated_bytes)
+
+    def test_remediation_is_deterministic_idempotent_and_preserves_passes(self) -> None:
+        text = (
+            "This public permit notice explains how residents can submit documents, "
+            "request assistance, and receive information about the review process."
+        )
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            first_output = root / "first.pdf"
+            second_output = root / "second.pdf"
+            repeated_output = root / "repeated.pdf"
+            with source.open("wb") as stream:
+                _text_writer(text).write(stream)
+
+            before = audit_pdf(source)
+            first = remediate_pdf(source, first_output)
+            remediate_pdf(source, second_output)
+            repeated = remediate_pdf(first_output, repeated_output)
+            first_bytes = first_output.read_bytes()
+            second_bytes = second_output.read_bytes()
+            repeated_bytes = repeated_output.read_bytes()
+
+        self.assertEqual(first_bytes, second_bytes)
+        self.assertEqual(first_bytes, repeated_bytes)
+        self.assertFalse(repeated.actions)
+        before_statuses = {item.check_id: item.status for item in before.findings}
+        after_statuses = {item.check_id: item.status for item in first.after_audit.findings}
+        self.assertFalse([
+            check_id
+            for check_id, status in before_statuses.items()
+            if status == "pass" and after_statuses[check_id] != "pass"
+        ])
+        checkpoints = {item["stage"]: item["status"] for item in first.checkpoints}
+        self.assertEqual(checkpoints["No-regression verification"], "Passed")
+        self.assertEqual(checkpoints["Idempotence verification"], "Passed")
+
+    def test_no_action_remediation_preserves_source_bytes(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            output = root / "output.pdf"
+            with source.open("wb") as stream:
+                _mixed_content_writer().write(stream)
+
+            report = remediate_pdf(source, output)
+            source_bytes = source.read_bytes()
+            output_bytes = output.read_bytes()
+
+        self.assertFalse(report.actions)
+        self.assertEqual(source_bytes, output_bytes)
+
     def test_absent_content_is_not_reported_as_pass(self) -> None:
         with TemporaryDirectory() as folder:
             source = Path(folder) / "plain.pdf"
@@ -539,6 +707,18 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("PDF18", document)
         self.assertIn("Source SHA-256", document)
         self.assertIn("Verified actions", document)
+        self.assertIn("Checker-to-remediator coverage", document)
+        self.assertIn("Automatic repair prohibited", document)
+        self.assertIn("Evidence needed", document)
+        self.assertEqual(len(result.capabilities), len(ACROBAT_RULE_IDS))
+        self.assertEqual(
+            {item.check_id for item in result.capabilities},
+            set(ACROBAT_RULE_IDS),
+        )
+        self.assertEqual(
+            sum(result.remediation_summary.values()),
+            len(ACROBAT_RULE_IDS),
+        )
         self.assertIn("Home / New upload", document)
         self.assertEqual(document.count('href="/new"'), 2)
         self.assertLess(document.index('href="/new"'), document.index('<nav class="report-nav"'))
@@ -635,6 +815,18 @@ class AccessibilityRemediationTests(unittest.TestCase):
             self.assertTrue(preserved.exists())
             self.assertEqual(list(states), ["current"])
 
+    def test_upload_reader_drains_large_slow_requests_before_rejecting(self) -> None:
+        limit = 20 * 1024 * 1024
+        for megabytes in (21, 25, 40, 50):
+            with self.subTest(megabytes=megabytes):
+                size = megabytes * 1024 * 1024
+                stream = _GeneratedSlowStream(size)
+                with self.assertRaises(PdfInputError) as raised:
+                    _read_limited_body(stream, content_length=size, limit=limit)
+                self.assertEqual(raised.exception.status_code, 413)
+                self.assertEqual(stream.position, size)
+                self.assertLessEqual(stream.max_requested, 64 * 1024)
+
     def test_corpus_runner_writes_reproducible_json_and_csv(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
@@ -657,7 +849,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
             self.assertTrue(result["python_version"])
             self.assertTrue(result["pypdf_version"])
             self.assertEqual(result["langdetect_version"], "1.0.9")
-            self.assertEqual(result["checker_version"], "2.3.0")
+            self.assertEqual(result["checker_version"], "2.4.0")
             self.assertEqual(saved["rows"][0]["file"], "sample.pdf")
             self.assertTrue((outputs / "sample.pdf.json").is_file())
             self.assertTrue((outputs / "corpus-summary.csv").is_file())
