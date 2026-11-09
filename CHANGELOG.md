@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### October 28 customer-feedback follow-up (local 2.4.1)
+### October 28 customer-feedback follow-up (2.4.1)
 
 - Require marked-content coverage on every page before declaring an existing structure tagged or enabling structure-based tab order; declaration and tab-order repairs can occur in the same verified pass.
 - Stop copying form mapping names (`/TM`) into tooltips. Validate existing `/Contents` and `/TU` values and reject generic, filename-like, and internal field-name placeholders.
@@ -15,7 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Accept bookmarks as multi-page bypass-navigation prerequisites, fail mixed documents with any image-only page, and reject additional generic titles and technical filename identifiers.
 - Keep title results stable when a PDF is renamed: reject technical filename identifiers independently of the upload name, while allowing descriptive titles to match descriptive filenames as permitted by PDF18.
 - Label partial-coverage WCAG passes explicitly and add captions and row-header scopes to report tables.
-- Raise the local checker to 2.4.1 and the ruleset to 2026.11.1; the deployed 2.4.0 reference is unchanged.
+- Raise the checker to 2.4.1 and the ruleset to 2026.11.1; deployed to the existing Azure pilot on November 9, 2026.
+- Verify the live upload-to-download workflow and 401 responses for missing or wrong API keys with 25 MB bodies. Preserve the existing private Key Vault boundary; authorized API behavior was verified in the exact production image locally, not against the live API.
 - LLM remediation, expanded rendering and structural validation, reading-order verification, and capability-classification changes remain outstanding; this is not completion of the full customer prompt.
 
 ### Changed

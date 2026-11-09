@@ -95,7 +95,7 @@ Human and assistive-technology review remains necessary for semantic quality, re
 
 ### Latest customer-feedback follow-up
 
-The local checker is now 2.4.1 (ruleset 2026.11.1). Partial-coverage criterion passes are explicitly labeled **Pass (partial coverage)** in both reports. Bookmarks can satisfy multi-page bypass-navigation prerequisites, any image-only page fails the image-only check even in a mixed document, and placeholder/filename titles and field labels are rejected more strictly.
+The checker and Azure pilot are now 2.4.1 (ruleset 2026.11.1). Partial-coverage criterion passes are explicitly labeled **Pass (partial coverage)** in both reports. Bookmarks can satisfy multi-page bypass-navigation prerequisites, any image-only page fails the image-only check even in a mixed document, and placeholder/filename titles and field labels are rejected more strictly.
 
 Title validation rejects technical filename identifiers even after a PDF is renamed. Unlike a blanket filename-stem rejection, a descriptive title may match a descriptive filename; this avoids filename-dependent results and follows PDF18's descriptive-title requirement.
 
@@ -185,7 +185,7 @@ The request body is read in bounded chunks. Oversized request bodies are consume
 Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` request header. Leaving the setting empty is suitable only for local development.
 The key is checked before body processing. Requests with a missing or wrong key are drained in bounded chunks without retaining their bodies before HTTP 401 is sent, including oversized requests. These request-handling changes require deployment and live-proxy smoke testing before they can be claimed as fixed on the hosted app.
 
-## Last verified Azure deployment (2.4.0)
+## Verified Azure deployment (2.4.1)
 
 The source changes for 2.4.1 described above have not been deployed. The following deployment details and live checks were last verified on October 28, 2026.
 
@@ -195,22 +195,23 @@ The staging/pilot App Service is available at:
 
 The deployed standalone browser workflow runs `pdf_accessibility_workflow.py` from the immutable container image:
 
-- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:remed24-984700f`
-- Digest: `sha256:0524078121950c08a88335ba445f7e1f6fd755dd64397046087abf79a2f65eca`
-- Checker version: `2.4.0`
-- Ruleset version: `2026.10.4`
+- Image: `crpdfadastaging33f3.azurecr.io/pdf-ada-remediator:remed241-6587756`
+- Digest: `sha256:31e15e4998fa3f988718211cd7e9d51119269f68bc514419f055f5826036b322`
+- Application source commit: `6587756f70d015e9b152a821f542d0f8d5891394`
+- Checker version: `2.4.1`
+- Ruleset version: `2026.11.1`
 - Audit schema: `6`
 
-Release validation completed on October 28, 2026:
+Release validation completed on November 9, 2026:
 
-- 29 unit and integration tests passed.
-- All 42 external source PDFs passed two-run audit, WCAG matrix, source-hash, output-hash, and reported-hash repeatability checks with zero errors.
-- The production container built and ran as the non-root `app` user.
-- Live health, audit, remediation, and remediated-PDF download checks succeeded.
-- The live report exposes checker `2.4.0`, ruleset `2026.10.4`, the complete checker-to-remediator matrix, and no-regression/idempotence checkpoints.
-- Live evidence-backed repairs set `/Marked = true` for an existing complete structure and normalized `en_US` to `en-US`; the downloaded PDF reopened successfully.
-- Browser uploads at 21 MB throttled, 25 MB, 40 MB, and 50 MB returned explicit HTTP 413 responses with no 502s. This did not verify oversized unauthorized requests to `/api/remediate`; the separate API fix in 2.4.1 still needs live verification.
-- The live top **Home / New upload** action cleared the active session and returned the same browser to a fresh upload page.
+- All 36 local tests passed. The exact ACR-built production image additionally passed 35 production-compatible tests; only the Git-dependent development corpus-runner test was excluded from that container run.
+- ACR build `ccx` succeeded using `Dockerfile.azure`. The pulled image ran as non-root `app` with Python 3.12.16 and pypdf 6.21.4; its dependency check passed.
+- Live health, PDF upload, audit, approval, remediation report, download, and session reset succeeded using a synthetic PDF. The report exposed checker `2.4.1`, ruleset `2026.11.1`, and no-regression/idempotence checkpoints.
+- The live downloaded PDF's SHA-256 matched direct remediation of the same input inside the exact production image.
+- Missing and wrong API keys with 25 MB bodies both returned HTTP 401 through the live Azure proxy, not 502. A corrupt browser upload returned a readable HTTP 422.
+- The local production-image API returned 413 for an authorized 25 MB body, 422 for a corrupt PDF, and 200 with the expected output hash for a valid PDF. Authorized live API checks were not run because the existing API key is protected by private Key Vault access; no secrets, access rules, or networking were changed.
+
+The previous `remed24-984700f` image remains available for rollback. No infrastructure was provisioned or changed.
 
 The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
 
@@ -227,7 +228,7 @@ The deployment uses the existing App Service managed identity for ACR access. No
 The Azure Functions workflow does not call or depend on another checker application. The current pilot endpoint above uses the standalone App Service workflow rather than this Functions entry point.
 Job blobs include an expiration timestamp and are covered by the storage lifecycle policy. Set `PDF_JOB_TTL_HOURS` to change the metadata timestamp; the deployed lifecycle policy remains the deletion authority.
 
-## Current source behavior (2.4.1; not yet deployed)
+## Current source and deployed behavior (2.4.1)
 
 - Checker version: `2.4.1`
 - Ruleset version: `2026.11.1`
@@ -249,7 +250,7 @@ Local validation completed on November 9, 2026:
 - Local HTTP smoke tests returned 401 for 25 MB requests with missing or wrong API keys, 413 for an authorized 25 MB request, 200 for a valid PDF, and 422 with a readable error for a corrupt PDF. The valid response hash matched direct remediation.
 - The available PDFs did not match the hashes in the latest 157-file customer manifest; these results are not a rerun of that exact corpus.
 - Stricter checker rules can reduce pass counts compared with 2.4.0 by exposing prior false passes. This is separate from verifying that remediation itself does not regress a source pass under the same checker.
-- The 2.4.1 changes have not been deployed or verified through the live Azure proxy.
+- The same 2.4.1 application build is deployed; live Azure proxy checks are documented in the deployment section above.
 
 ## Deterministic behavior
 
