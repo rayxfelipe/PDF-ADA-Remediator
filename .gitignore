@@ -9,6 +9,7 @@ local.settings.json
 *.pdf
 *.docx
 pdf_files/
+/Evan Testing/
 Acrobat Accessibility Report/
 reports/
 accessibility-report*.html

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### October 28 customer-feedback follow-up (local 2.4.1)
+
+- Require marked-content coverage on every page before declaring an existing structure tagged or enabling structure-based tab order; declaration and tab-order repairs can occur in the same verified pass.
+- Stop copying form mapping names (`/TM`) into tooltips. Validate existing `/Contents` and `/TU` values and reject generic, filename-like, and internal field-name placeholders.
+- Normalize regional language-detector codes and reject CJK results inconsistent with the observed script instead of writing an incorrect document language.
+- Drain unauthorized API request bodies without retaining them before returning HTTP 401, including requests larger than the upload limit.
+- Accept bookmarks as multi-page bypass-navigation prerequisites, fail mixed documents with any image-only page, and reject additional generic titles and technical filename identifiers.
+- Keep title results stable when a PDF is renamed: reject technical filename identifiers independently of the upload name, while allowing descriptive titles to match descriptive filenames as permitted by PDF18.
+- Label partial-coverage WCAG passes explicitly and add captions and row-header scopes to report tables.
+- Raise the local checker to 2.4.1 and the ruleset to 2026.11.1; the deployed 2.4.0 reference is unchanged.
+- LLM remediation, expanded rendering and structural validation, reading-order verification, and capability-classification changes remain outstanding; this is not completion of the full customer prompt.
+
 ### Changed
 
 - Add a complete checker-to-remediator coverage matrix that classifies all 34 deterministic checks and identifies missing evidence and required human actions.

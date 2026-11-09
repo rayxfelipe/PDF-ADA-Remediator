@@ -341,26 +341,27 @@ def serve_workflow(remediated_pdf_path: Path | None, default_language: str, open
             if route not in {"/upload-pdf", "/remediate", "/api/remediate"}:
                 self.send_error(404)
                 return
-            if route == "/api/remediate" and not _valid_api_key(
+            unauthorized = route == "/api/remediate" and not _valid_api_key(
                 os.getenv("REMEDIATOR_API_KEY", ""),
                 self.headers.get("X-Remediator-Key", ""),
-            ):
-                self.send_error(401, "Invalid remediation API key")
-                self.close_connection = True
-                return
+            )
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 self.send_error(400, "Invalid content length")
                 return
             try:
+                # A zero-byte retention limit drains unauthorized bodies without storing them.
                 body = _read_limited_body(
                     self.rfile,
                     content_length,
-                    MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES,
+                    0 if unauthorized else MAX_PDF_BYTES + MULTIPART_OVERHEAD_BYTES,
                 )
             except PdfInputError as exc:
-                self.send_error(exc.status_code, str(exc))
+                if unauthorized:
+                    self.send_error(401, "Invalid remediation API key")
+                else:
+                    self.send_error(exc.status_code, str(exc))
                 return
             if route == "/api/remediate":
                 try:

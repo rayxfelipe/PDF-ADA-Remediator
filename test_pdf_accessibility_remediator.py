@@ -1,9 +1,11 @@
 from io import BufferedIOBase, BytesIO
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
@@ -21,6 +23,7 @@ from pdf_accessibility_audit import (
     ACROBAT_RULE_IDS,
     WEIGHTS,
     PdfInputError,
+    _detect_document_language,
     audit_pdf,
     is_meaningful_title,
     read_json,
@@ -37,6 +40,7 @@ from pdf_accessibility_workflow import (
     _read_limited_body,
     _valid_api_key,
     remediate_api_payload,
+    serve_workflow,
 )
 
 
@@ -108,6 +112,7 @@ def _form_writer(
     tooltip: str | None,
     inherited: bool = False,
     mapping_name: str | None = None,
+    contents: str | None = None,
 ) -> PdfWriter:
     writer = _mixed_content_writer()
     page = writer.pages[0]
@@ -137,6 +142,8 @@ def _form_writer(
         widget[NameObject("/TU")] = TextStringObject(tooltip)
     if not inherited and mapping_name is not None:
         widget[NameObject("/TM")] = TextStringObject(mapping_name)
+    if contents is not None:
+        widget[NameObject("/Contents")] = TextStringObject(contents)
     page[NameObject("/Annots")] = ArrayObject([widget_ref])
     writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
         NameObject("/Fields"): ArrayObject([field_ref]),
@@ -148,6 +155,7 @@ def _structured_writer(
     marked: bool,
     structure_language: str | None = None,
     focusable: bool = False,
+    tagged_content: bool = True,
 ) -> PdfWriter:
     writer = _mixed_content_writer()
     if focusable:
@@ -168,6 +176,7 @@ def _structured_writer(
     element = DictionaryObject({
         NameObject("/Type"): NameObject("/StructElem"),
         NameObject("/S"): NameObject("/P"),
+        NameObject("/Pg"): writer.pages[0].indirect_reference,
         NameObject("/K"): NumberObject(0),
     })
     if structure_language is not None:
@@ -181,6 +190,11 @@ def _structured_writer(
         NameObject("/ParentTree"): writer._add_object(DictionaryObject()),
         NameObject("/K"): element_ref,
     }))
+    if tagged_content:
+        content = writer.pages[0].get_contents()
+        assert content is not None
+        content.set_data(b"/P <</MCID 0>> BDC\n" + content.get_data() + b"\nEMC")
+        writer.pages[0].replace_contents(content)
     return writer
 
 
@@ -216,8 +230,8 @@ class AccessibilityRemediationTests(unittest.TestCase):
             second = audit_pdf(source)
 
         self.assertEqual(first.schema_version, 6)
-        self.assertEqual(first.checker_version, "2.4.0")
-        self.assertEqual(first.ruleset_version, "2026.10.4")
+        self.assertEqual(first.checker_version, "2.4.1")
+        self.assertEqual(first.ruleset_version, "2026.11.1")
         self.assertEqual(first.file, "source.pdf")
         self.assertEqual(first.source_sha256, second.source_sha256)
         self.assertEqual(first.summary, second.summary)
@@ -413,11 +427,50 @@ class AccessibilityRemediationTests(unittest.TestCase):
             "permit.pdf",
             "Microsoft Word - permit",
             "abc",
+            "Microsoft Excel - Book1.xlsx",
+            "Untitled Document",
+            "New Document",
+            "Book1",
+            "Sheet1",
+            "Title",
+            "Adobe Acrobat Document",
+            "Scan",
+            "Image",
+            "Word Document",
+            "Untitled-1",
+            "Presentation1",
+            "Test Document",
+            "Form",
         )
         for title in rejected:
             with self.subTest(title=title):
                 self.assertFalse(is_meaningful_title(title, "permit.pdf"))
+        self.assertFalse(is_meaningful_title("CI0_114452", "CI0_114452.pdf"))
+        self.assertFalse(is_meaningful_title("CI0_114452", "renamed.pdf"))
+        self.assertTrue(is_meaningful_title("Permit Instructions", "Permit Instructions.pdf"))
         self.assertTrue(is_meaningful_title("Residential Permit Instructions", "permit.pdf"))
+
+    def test_title_result_does_not_change_when_pdf_is_renamed(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            for title in ("Permit Instructions", "CI0_114452"):
+                with self.subTest(title=title):
+                    source = root / f"{title}.pdf"
+                    output = root / "renamed.pdf"
+                    writer = _mixed_content_writer()
+                    writer.add_metadata({"/Title": title})
+                    writer._root_object[NameObject("/ViewerPreferences")] = DictionaryObject({
+                        NameObject("/DisplayDocTitle"): BooleanObject(True),
+                    })
+                    with source.open("wb") as stream:
+                        writer.write(stream)
+                    report = remediate_pdf(source, output)
+                    criterion = next(item for item in report.wcag_results if item.criterion == "2.4.2")
+                    expected = "pass" if title == "Permit Instructions" else "fail"
+                    self.assertEqual(criterion.before_status, expected)
+                    self.assertEqual(criterion.after_status, expected)
+                    self.assertEqual(source.read_bytes(), output.read_bytes())
+                    self.assertFalse(report.actions)
 
     def test_form_description_requires_tu_and_supports_inheritance(self) -> None:
         with TemporaryDirectory() as folder:
@@ -441,13 +494,13 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertEqual(missing.status, "fail")
         self.assertEqual(described.status, "pass")
 
-    def test_remediation_propagates_existing_form_mapping_names(self) -> None:
+    def test_remediation_propagates_validated_form_contents(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "form.pdf"
             output = root / "form-remediated.pdf"
             with source.open("wb") as stream:
-                _form_writer(None, mapping_name="Account number").write(stream)
+                _form_writer(None, contents="Account number").write(stream)
 
             report = remediate_pdf(source, output)
             fields = PdfReader(output).get_fields() or {}
@@ -463,6 +516,109 @@ class AccessibilityRemediationTests(unittest.TestCase):
             if item.check_id == "ACR-FORM-002"
         )
         self.assertEqual(finding.status, "pass")
+
+    def test_remediation_rejects_mapping_names_and_placeholder_tooltips(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            for value in ("txt_fld_3", "f1", "Text1", "image", "field", "label", "form.pdf"):
+                for source_key in ("mapping_name", "contents"):
+                    with self.subTest(value=value, source_key=source_key):
+                        source = root / "form.pdf"
+                        output = root / "output.pdf"
+                        writer = _form_writer(
+                            None,
+                            mapping_name=value if source_key == "mapping_name" else None,
+                            contents=value if source_key == "contents" else None,
+                        )
+                        with source.open("wb") as stream:
+                            writer.write(stream)
+                        report = remediate_pdf(source, output)
+                        self.assertFalse(any(action.action_id == "propagate-form-tooltips" for action in report.actions))
+                        finding = next(item for item in report.after_audit.findings if item.check_id == "ACR-FORM-002")
+                        self.assertEqual(finding.status, "fail")
+                        self.assertNotIn("/TU", next(iter((PdfReader(output).get_fields() or {}).values())))
+            source = root / "existing-placeholder.pdf"
+            with source.open("wb") as stream:
+                _form_writer("Text1").write(stream)
+            finding = next(item for item in audit_pdf(source).findings if item.check_id == "ACR-FORM-002")
+            self.assertEqual(finding.status, "fail")
+
+    def test_remediation_does_not_declare_or_trust_unmarked_page_content(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            for marked in (False, True):
+                with self.subTest(marked=marked):
+                    source = root / "unmarked.pdf"
+                    output = root / "output.pdf"
+                    with source.open("wb") as stream:
+                        _structured_writer(marked, focusable=True, tagged_content=False).write(stream)
+                    report = remediate_pdf(source, output)
+                    actions = {action.action_id for action in report.actions}
+                    self.assertNotIn("declare-existing-structure", actions)
+                    self.assertNotIn("set-structure-tab-order", actions)
+                    self.assertEqual(
+                        next(item.status for item in report.after_audit.findings if item.check_id == "ACR-PAGE-001"),
+                        "fail",
+                    )
+
+    def test_cjk_language_detection_is_script_consistent(self) -> None:
+        samples = {
+            "zh-Hans": "\u6d1b\u6749\u77f6\u5e02\u901a\u8fc7\u8bb8\u591a\u90e8\u95e8\u548c\u529e\u4e8b\u5904\u4e3a\u5c45\u6c11\u63d0\u4f9b\u516c\u5171\u670d\u52a1\u3002\u672c\u901a\u77e5\u8bf4\u660e\u5982\u4f55\u5728\u7ebf\u7533\u8bf7\u8bb8\u53ef\u8bc1\u3001\u7f34\u7eb3\u8d39\u7528\u4ee5\u53ca\u7533\u8bf7\u68c0\u67e5\u3002",
+            "zh-Hant": "\u6d1b\u6749\u78ef\u5e02\u900f\u904e\u8a31\u591a\u90e8\u9580\u548c\u8fa6\u4e8b\u8655\u70ba\u5c45\u6c11\u63d0\u4f9b\u516c\u5171\u670d\u52d9\u3002\u672c\u901a\u77e5\u8aaa\u660e\u5982\u4f55\u5728\u7dda\u7533\u8acb\u8a31\u53ef\u8b49\u3001\u7e73\u7d0d\u8cbb\u7528\u4ee5\u53ca\u7533\u8acb\u6aa2\u67e5\u3002",
+            "ja": "\u6771\u4eac\u90fd\u306f\u65e5\u672c\u306e\u9996\u90fd\u3067\u3042\u308a\u3001\u591a\u304f\u306e\u4eba\u3005\u304c\u4f4f\u3093\u3067\u3044\u307e\u3059\u3002\u516c\u5171\u30b5\u30fc\u30d3\u30b9\u306b\u3064\u3044\u3066\u306e\u304a\u77e5\u3089\u305b\u3067\u3059\u3002",
+            "ko": "\uc774 \ubb38\uc11c\ub294 \uc2dc\ubbfc\uc744 \uc704\ud55c \uacf5\uacf5 \uc11c\ube44\uc2a4\uc640 \uac74\ucd95 \ud5c8\uac00 \uc2e0\uccad \ubc29\ubc95\uc744 \uc548\ub0b4\ud569\ub2c8\ub2e4. \uc790\uc138\ud55c \uc815\ubcf4\ub97c \ud655\uc778\ud558\uc138\uc694.",
+        }
+        for language, text in samples.items():
+            with self.subTest(language=language):
+                result = _detect_document_language(text * 4)
+                self.assertTrue(result is None or result[0] == language.split("-")[0])
+                self.assertEqual(result, _detect_document_language(text * 4))
+                if language in {"ja", "ko"}:
+                    self.assertIsNotNone(result)
+        with patch("pdf_accessibility_audit.detect_langs", return_value=[SimpleNamespace(lang="zh-cn", prob=1.0)]):
+            self.assertEqual(_detect_document_language(samples["zh-Hans"] * 4), ("zh", 1.0))
+        with patch("pdf_accessibility_audit.detect_langs", return_value=[SimpleNamespace(lang="ko", prob=1.0)]):
+            self.assertIsNone(_detect_document_language(samples["zh-Hant"] * 4))
+            with TemporaryDirectory() as folder:
+                source = Path(folder) / "chinese.pdf"
+                output = Path(folder) / "output.pdf"
+                with source.open("wb") as stream:
+                    _mixed_content_writer().write(stream)
+                with patch("pypdf._page.PageObject.extract_text", return_value=samples["zh-Hant"] * 4):
+                    report = remediate_pdf(source, output)
+                catalog = PdfReader(output).trailer["/Root"].get_object()
+                assert isinstance(catalog, DictionaryObject)
+                self.assertNotIn("/Lang", catalog)
+                self.assertEqual(
+                    next(item.status for item in report.after_audit.findings if item.check_id == "ACR-DOC-005"),
+                    "fail",
+                )
+
+    def test_bookmarks_satisfy_bypass_navigation(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "bookmarked.pdf"
+            writer = _mixed_content_writer()
+            writer.add_blank_page(72, 72)
+            writer.add_outline_item("Permit instructions", 0)
+            with source.open("wb") as stream:
+                writer.write(stream)
+            report = audit_pdf(source)
+        criterion = next(item for item in report.wcag_results if item.criterion == "2.4.1")
+        self.assertEqual(criterion.status, "pass")
+        self.assertEqual(criterion.coverage, "additional_review")
+        self.assertIn("PDF2", criterion.techniques)
+
+    def test_mixed_document_fails_image_only_check(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "mixed.pdf"
+            writer = _mixed_content_writer()
+            writer.add_page(_image_only_writer().pages[0])
+            with source.open("wb") as stream:
+                writer.write(stream)
+            report = audit_pdf(source)
+        finding = next(item for item in report.findings if item.check_id == "ACR-DOC-002")
+        self.assertEqual(finding.status, "fail")
+        self.assertEqual(finding.pages, [2])
 
     def test_remediation_declares_existing_structure_and_normalizes_languages(self) -> None:
         with TemporaryDirectory() as folder:
@@ -710,6 +866,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("Checker-to-remediator coverage", document)
         self.assertIn("Automatic repair prohibited", document)
         self.assertIn("Evidence needed", document)
+        self.assertIn("Pass (partial coverage)", document)
+        self.assertEqual(document.count("<table"), document.count("<caption>"))
+        self.assertNotIn("<th>", document)
         self.assertEqual(len(result.capabilities), len(ACROBAT_RULE_IDS))
         self.assertEqual(
             {item.check_id for item in result.capabilities},
@@ -722,6 +881,9 @@ class AccessibilityRemediationTests(unittest.TestCase):
         self.assertIn("Home / New upload", document)
         self.assertEqual(document.count('href="/new"'), 2)
         self.assertLess(document.index('href="/new"'), document.index('<nav class="report-nav"'))
+        self.assertIn("Pass (partial coverage)", document)
+        self.assertEqual(document.count("<table"), document.count("<caption>"))
+        self.assertNotIn("<th>", document)
         self.assertNotIn("Not tested by this application", document)
         self.assertNotIn("Imported checker", document)
         self.assertNotIn("third-party", document.lower())
@@ -827,6 +989,27 @@ class AccessibilityRemediationTests(unittest.TestCase):
                 self.assertEqual(stream.position, size)
                 self.assertLessEqual(stream.max_requested, 64 * 1024)
 
+    def test_api_drains_unauthorized_bodies_before_returning_401(self) -> None:
+        with patch("pdf_accessibility_workflow.ThreadingHTTPServer") as server_factory:
+            server_factory.return_value.server_port = 8080
+            serve_workflow(None, "en-US", False)
+        handler_type = server_factory.call_args.args[1]
+        for key in ("", "wrong"):
+            for megabytes in (0, 1, 25):
+                with self.subTest(key=key, megabytes=megabytes):
+                    size = megabytes * 1024 * 1024
+                    body = _GeneratedSlowStream(size)
+                    handler = object.__new__(handler_type)
+                    handler.path = "/api/remediate"
+                    handler.headers = {"Content-Length": str(size), "X-Remediator-Key": key}
+                    handler.rfile = body
+                    responses = []
+                    handler.send_error = lambda status, _message: responses.append((status, body.position))
+                    with patch.dict(os.environ, {"REMEDIATOR_API_KEY": "expected"}):
+                        handler.do_POST()
+                    self.assertEqual(responses, [(401, size)])
+                    self.assertLessEqual(body.max_requested, 64 * 1024)
+
     def test_corpus_runner_writes_reproducible_json_and_csv(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
@@ -849,7 +1032,7 @@ class AccessibilityRemediationTests(unittest.TestCase):
             self.assertTrue(result["python_version"])
             self.assertTrue(result["pypdf_version"])
             self.assertEqual(result["langdetect_version"], "1.0.9")
-            self.assertEqual(result["checker_version"], "2.4.0")
+            self.assertEqual(result["checker_version"], "2.4.1")
             self.assertEqual(saved["rows"][0]["file"], "sample.pdf")
             self.assertTrue((outputs / "sample.pdf.json").is_file())
             self.assertTrue((outputs / "corpus-summary.csv").is_file())

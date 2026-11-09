@@ -21,15 +21,16 @@ from pdf_accessibility_audit import (
     REMEDIATION_REPORTS_DIR,
     _pdf_boolean,
     audit_pdf,
+    is_meaningful_label,
     is_meaningful_title,
 )
 from pdf_accessibility_policy import (
     WCAG_COMPLETION_LABELS,
-    WCAG_STATUS_LABELS,
     WcagComparison,
     compare_wcag,
     summarize_wcag,
     wcag_determination,
+    wcag_status_label,
 )
 from pdf_accessibility_ui import APP_STYLES, app_footer, app_header
 
@@ -127,12 +128,12 @@ MANUAL_ONLY_RULES = {
 }
 PROHIBITED_AUTOMATION_RULES = set(ACROBAT_RULE_IDS) - EVIDENCE_DEPENDENT_RULES - MANUAL_ONLY_RULES
 EVIDENCE_REQUIREMENTS = {
-    "ACR-DOC-003": "A structure tree, parent tree, and existing structure elements must already be present.",
+    "ACR-DOC-003": "A structure tree and parent tree must exist, and every page must pass marked-content coverage.",
     "ACR-DOC-005": "High-confidence extracted-language evidence must identify the document's primary language.",
-    "ACR-DOC-006": "A meaningful metadata title that does not duplicate the filename must already exist.",
+    "ACR-DOC-006": "A descriptive metadata title that is not a generic placeholder or filename-like identifier must already exist.",
     "ACR-DOC-010": "Every invalid declared structure-language tag must have one unambiguous BCP 47 normalization.",
-    "ACR-PAGE-003": "The document must already have a complete structure tree before structure-based tab order can be enabled.",
-    "ACR-FORM-002": "Every missing tooltip must have an existing non-empty /TM or /Contents value.",
+    "ACR-PAGE-003": "The document must have a complete structure tree and verified marked-content coverage before structure-based tab order can be enabled.",
+    "ACR-FORM-002": "Every missing or invalid tooltip must have an existing /Contents value that passes label validation; /TM is not a label.",
 }
 
 if (
@@ -206,11 +207,11 @@ def _tooltip_candidates(root: DictionaryObject) -> tuple[int, list[tuple[Diction
     missing = 0
     candidates: list[tuple[DictionaryObject, str]] = []
     for field in _form_fields(root):
-        if _inherited_field_text(field, "/TU"):
+        if is_meaningful_label(_inherited_field_text(field, "/TU")):
             continue
         missing += 1
-        candidate = _field_text(field.get("/TM")) or _field_text(field.get("/Contents"))
-        if len(candidate) >= 2:
+        candidate = _field_text(field.get("/Contents"))
+        if is_meaningful_label(candidate):
             candidates.append((field, candidate))
     return missing, candidates
 
@@ -355,6 +356,7 @@ def _build_remediation_plan(
         findings["ACR-DOC-003"].status == "fail"
         and not marked
         and _has_complete_structure_evidence(root)
+        and findings["ACR-PAGE-001"].status == "pass"
     ):
         actions.append(_PlannedAction(
             "declare-existing-structure",
@@ -390,7 +392,14 @@ def _build_remediation_plan(
             "true",
         ))
 
-    if findings["ACR-DOC-003"].status == "pass" and findings["ACR-PAGE-003"].status == "fail":
+    structure_available = findings["ACR-DOC-003"].status == "pass" or any(
+        action.action_id == "declare-existing-structure" for action in actions
+    )
+    if (
+        structure_available
+        and findings["ACR-PAGE-001"].status == "pass"
+        and findings["ACR-PAGE-003"].status == "fail"
+    ):
         actions.append(_PlannedAction(
             "set-structure-tab-order",
             "ACR-PAGE-003",
@@ -410,7 +419,7 @@ def _build_remediation_plan(
             "ACR-FORM-002",
             "/AcroForm/Fields/*/TU",
             f"{missing_tooltips} missing",
-            f"{missing_tooltips} populated from existing /TM or /Contents values",
+            f"{missing_tooltips} populated from validated existing /Contents values",
         ))
 
     invalid_languages, language_candidates = _structure_language_candidates(root)
@@ -698,11 +707,11 @@ def write_remediation_html(
         for item in report.checkpoints
     )
     wcag_rows = "".join(
-        f"""<tr><td><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</td><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(WCAG_STATUS_LABELS[item.before_status])}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(WCAG_STATUS_LABELS[item.after_status])}</span></td><td>{e(item.coverage.replace('_', ' ').title())}</td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
+        f"""<tr><th scope="row"><strong>{e(item.criterion)}</strong><br>Level {e(item.level)}</th><td>{e(item.name)}</td><td><span class="result-label result-{e(item.before_status)}">{e(wcag_status_label(item.before_status, item.coverage))}</span></td><td><span class="result-label result-{e(item.after_status)}">{e(wcag_status_label(item.after_status, item.coverage))}</span></td><td>{e(item.coverage.replace('_', ' ').title())}</td><td><span class="result-label result-{e(item.completion)}">{e(WCAG_COMPLETION_LABELS[item.completion])}</span></td><td>{e(item.rationale)}<br><code>{e(', '.join(item.techniques) or 'No PDF technique cited')}</code></td><td><code>{e(', '.join(item.check_ids) or 'No mapped check')}</code></td></tr>"""
         for item in report.wcag_results
     )
     capability_rows = "".join(
-        f"""<tr><td><code>{e(item.check_id)}</code></td><td>{e(item.requirement)}</td><td><span class="result-label result-{e(item.classification)}">{e(capability_labels[item.classification])}</span></td><td>{e(item.reason)}</td><td>{e(item.evidence_needed)}</td><td>{e(item.human_action)}</td></tr>"""
+        f"""<tr><th scope="row"><code>{e(item.check_id)}</code></th><td>{e(item.requirement)}</td><td><span class="result-label result-{e(item.classification)}">{e(capability_labels[item.classification])}</span></td><td>{e(item.reason)}</td><td>{e(item.evidence_needed)}</td><td>{e(item.human_action)}</td></tr>"""
         for item in report.capabilities
     )
     download = f'<a class="button" href="{e(download_url, quote=True)}" download>Download remediated PDF</a>' if download_url else ""
@@ -737,7 +746,7 @@ def write_remediation_html(
 <div class="report-card report-kpi manual"><strong>{report.wcag_summary.get('additional_review', 0)}</strong><span>Additional review</span></div>
 <div class="report-card report-kpi"><strong>{report.wcag_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Coverage</th><th scope="col">Completion</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><caption>WCAG 2.1 Level AA results before and after remediation</caption><thead><tr><th scope="col">Criterion</th><th scope="col">Requirement</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Coverage</th><th scope="col">Completion</th><th scope="col">Rationale / techniques</th><th scope="col">Application checks</th></tr></thead><tbody>{wcag_rows}</tbody></table></div>
 </section>
 <section id="capabilities" class="report-section" aria-labelledby="capabilities-heading"><h3 id="capabilities-heading">Checker-to-remediator coverage</h3>
 <p>This inventory classifies every deterministic check. Automatic repair is offered only when the PDF already contains enough evidence to make a bounded change without inventing content or semantics.</p>
@@ -749,7 +758,7 @@ def write_remediation_html(
 <div class="report-card report-kpi pass"><strong>{report.remediation_summary.get('no_change_needed', 0)}</strong><span>Already pass</span></div>
 <div class="report-card report-kpi"><strong>{report.remediation_summary.get('not_applicable', 0)}</strong><span>Not applicable</span></div>
 </div>
-<div class="report-card"><table class="policy-table"><thead><tr><th scope="col">Check</th><th scope="col">Requirement</th><th scope="col">Classification</th><th scope="col">Why</th><th scope="col">Evidence needed</th><th scope="col">Human action</th></tr></thead><tbody>{capability_rows}</tbody></table></div>
+<div class="report-card"><table class="policy-table"><caption>Checker-to-remediator coverage</caption><thead><tr><th scope="col">Check</th><th scope="col">Requirement</th><th scope="col">Classification</th><th scope="col">Why</th><th scope="col">Evidence needed</th><th scope="col">Human action</th></tr></thead><tbody>{capability_rows}</tbody></table></div>
 </section>
 <section id="actions" class="report-section" aria-labelledby="actions-heading"><h3 id="actions-heading">Verified actions</h3><div class="report-card action"><ul>{action_rows}</ul></div></section>
 <section id="verification" class="report-section" aria-labelledby="verification-heading"><h3 id="verification-heading">Verification identity</h3>

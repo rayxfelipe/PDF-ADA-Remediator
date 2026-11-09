@@ -73,8 +73,8 @@ The remediator currently applies only these deterministic changes:
 - Set or correct the default document language only when repeatable text-language evidence is sufficiently strong.
 - Enable title display when a meaningful title already exists.
 - Set structure-based page tab order when the existing structure tree passes local validation.
-- Propagate an existing form mapping name (`/TM`) or widget contents value into a missing tooltip (`/TU`) only when every missing tooltip has a source value.
-- Set `/MarkInfo /Marked` only when a structure tree, parent tree, and existing structure elements already prove that the document is tagged.
+- Propagate an existing widget contents value (`/Contents`) into a missing or invalid tooltip (`/TU`) only when every affected tooltip has a validated descriptive source value. Mapping names (`/TM`) are never used as labels.
+- Set `/MarkInfo /Marked` only when a structure tree, parent tree, existing structure elements, and marked-content coverage on every page already prove that the document is tagged.
 - Normalize invalid structure-element language tags only when their language identity is unambiguous, such as `en_US` to `en-US`.
 
 Every remediation run rejects an output if the page count changes, an existing deterministic pass regresses, an applied action does not verify as passing, or a second remediation plan would make additional changes. When no safe action is available, the source bytes are copied unchanged.
@@ -92,6 +92,16 @@ The remediator does not:
 - Claim ADA, WCAG, PDF/UA, or Section 508 conformance.
 
 Human and assistive-technology review remains necessary for semantic quality, reading order, usability, and complete conformance evaluation.
+
+### Latest customer-feedback follow-up
+
+The local checker is now 2.4.1 (ruleset 2026.11.1). Partial-coverage criterion passes are explicitly labeled **Pass (partial coverage)** in both reports. Bookmarks can satisfy multi-page bypass-navigation prerequisites, any image-only page fails the image-only check even in a mixed document, and placeholder/filename titles and field labels are rejected more strictly.
+
+Title validation rejects technical filename identifiers even after a PDF is renamed. Unlike a blanket filename-stem rejection, a descriptive title may match a descriptive filename; this avoids filename-dependent results and follows PDF18's descriptive-title requirement.
+
+Language detection normalizes regional detector codes and rejects script-inconsistent CJK results. Inconclusive Chinese detection does not invent a language: a missing `/Lang` remains a failure.
+
+The October 28 feedback also requests LLM-generated alt text, tagging, titles, OCR, broader machine checks, stronger independent PDF validation, and revised remediation capability classifications. Those capabilities are **not implemented in this follow-up**. The application still performs no model calls and must not be described as completing that entire prompt. A strict-parser pass is still only partial structural-validation coverage; reading-order semantics are not verified.
 
 ## Requirements
 
@@ -173,8 +183,11 @@ The endpoint audits, remediates, and verifies the PDF locally. It returns the re
 The request body is read in bounded chunks. Oversized request bodies are consumed without being retained and return HTTP 413 consistently; the browser also rejects files above the configured limit before upload. Set `PDF_MAX_UPLOAD_BYTES` to change the default 20 MB limit.
 
 Set `REMEDIATOR_API_KEY` to require the same value in the `X-Remediator-Key` request header. Leaving the setting empty is suitable only for local development.
+The key is checked before body processing. Requests with a missing or wrong key are drained in bounded chunks without retaining their bodies before HTTP 401 is sent, including oversized requests. These request-handling changes require deployment and live-proxy smoke testing before they can be claimed as fixed on the hosted app.
 
-## Current Azure deployment
+## Last verified Azure deployment (2.4.0)
+
+The source changes for 2.4.1 described above have not been deployed. The following deployment details and live checks were last verified on October 28, 2026.
 
 The staging/pilot App Service is available at:
 
@@ -196,7 +209,7 @@ Release validation completed on October 28, 2026:
 - Live health, audit, remediation, and remediated-PDF download checks succeeded.
 - The live report exposes checker `2.4.0`, ruleset `2026.10.4`, the complete checker-to-remediator matrix, and no-regression/idempotence checkpoints.
 - Live evidence-backed repairs set `/Marked = true` for an existing complete structure and normalized `en_US` to `en-US`; the downloaded PDF reopened successfully.
-- Live uploads at 21 MB throttled, 25 MB, 40 MB, and 50 MB returned explicit HTTP 413 responses with no 502s.
+- Browser uploads at 21 MB throttled, 25 MB, 40 MB, and 50 MB returned explicit HTTP 413 responses with no 502s. This did not verify oversized unauthorized requests to `/api/remediate`; the separate API fix in 2.4.1 still needs live verification.
 - The live top **Home / New upload** action cleared the active session and returned the same browser to a fresh upload page.
 
 The deployment uses the existing App Service managed identity for ACR access. No customer corpus files or generated corpus reports are stored in this repository.
@@ -214,29 +227,29 @@ The deployment uses the existing App Service managed identity for ACR access. No
 The Azure Functions workflow does not call or depend on another checker application. The current pilot endpoint above uses the standalone App Service workflow rather than this Functions entry point.
 Job blobs include an expiration timestamp and are covered by the storage lifecycle policy. Set `PDF_JOB_TTL_HOURS` to change the metadata timestamp; the deployed lifecycle policy remains the deletion authority.
 
-## Current release behavior
+## Current source behavior (2.4.1; not yet deployed)
 
-- Checker version: `2.4.0`
-- Ruleset version: `2026.10.4`
+- Checker version: `2.4.1`
+- Ruleset version: `2026.11.1`
 - Audit schema: `6`
 - Missing or invalid document `/Lang` values fail even when language detection is inconclusive.
 - Mapped deterministic WCAG results are reported independently from additional-review coverage.
 - Strict PDF structural parsing contributes a partial-coverage machine result for WCAG 4.1.1.
 - Declared structure-element language tags contribute a partial-coverage machine result for WCAG 3.1.2.
 - Remediation reports classify every deterministic check and state why automation is unavailable, what evidence is missing, and what a human should do.
-- Existing complete structure metadata can be declared as tagged without generating structure, and unambiguous structure-language tags can be normalized without guessing.
+- Existing structure metadata can be declared as tagged only when every page passes local marked-content coverage; this does not generate tags or establish full parent-tree integrity. Unambiguous structure-language tags can be normalized without guessing.
 - Remediation verifies page-count preservation, no regression of existing passes, action success, and an empty second-pass plan.
 - Visual and semantic criteria remain out of scope when the application lacks a reliable renderer, OCR comparison, passage detector, or visible-label association; they are not relabeled as passing.
 
-Validation completed on October 28, 2026:
+Local validation completed on November 9, 2026:
 
-- 29 unit and integration tests passed.
-- Pylance reported no diagnostics in the modified production modules.
-- Python compilation and Azure Function import checks passed.
-- Synthetic fixtures verify every supported remediation path without adding customer PDFs to the repository.
-- Generated slow request streams of 21, 25, 40, and 50 MB were fully drained in bounded chunks and rejected with HTTP 413.
-- Live Azure uploads of 21 MB (throttled to 4 MB/s), 25 MB, 40 MB, and 50 MB each returned an explicit HTTP 413 limit response with no proxy 502; App Service remained running and Resource Health remained available.
-- Evan's 42-file source manifest passed with zero errors: 42/42 repeatable audits, WCAG matrices, remediation output hashes, source hashes, and reported output-file hashes.
+- 36 automated tests passed; the modified production modules had no Pylance diagnostics.
+- Of 174 unique available local PDFs, 173 readable files passed repeated audit/output, independent re-audit, idempotence, no-action byte-preservation, unchanged text/pages/content streams, and no-remediation-regression checks. One already-corrupt input was rejected before and after the changes.
+- Source hashes were unchanged for all 173 readable inputs. Rendering/pixel comparisons were not performed.
+- Local HTTP smoke tests returned 401 for 25 MB requests with missing or wrong API keys, 413 for an authorized 25 MB request, 200 for a valid PDF, and 422 with a readable error for a corrupt PDF. The valid response hash matched direct remediation.
+- The available PDFs did not match the hashes in the latest 157-file customer manifest; these results are not a rerun of that exact corpus.
+- Stricter checker rules can reduce pass counts compared with 2.4.0 by exposing prior false passes. This is separate from verifying that remediation itself does not regress a source pass under the same checker.
+- The 2.4.1 changes have not been deployed or verified through the live Azure proxy.
 
 ## Deterministic behavior
 
@@ -253,7 +266,7 @@ Generation timestamps differ, but repeated runs with the same runtime and depend
 
 ## Run an external corpus regression
 
-Keep customer PDFs and manifests outside the repository. Point the generic runner at that external directory:
+Keep customer PDFs and manifests outside tracked repository content. A local ignored context folder is also acceptable. Point the generic runner at the corpus directory:
 
 ```powershell
 python corpus_regression.py `
@@ -291,10 +304,14 @@ The tests cover:
 - Placeholder and filename-like title rejection
 - Correct not-applicable and out-of-scope classification
 - Inherited form-field `/TU` validation
-- Safe `/TM` or `/Contents` to `/TU` propagation with post-remediation verification
+- Validated `/Contents` to `/TU` propagation with post-remediation verification, and rejection of `/TM` as a label source
+- CJK script-consistency guards and regional detector-code normalization
+- Marked-content coverage before structure declaration or tab-order repair
+- Mixed text/image-only pages and bookmark-based bypass-navigation prerequisites
+- Partial-coverage report labels and captioned tables
 - Separation of automated WCAG outcomes from additional-review coverage
 - Strict PDF structural-validation results
-- Exact and oversized upload-body handling
+- Exact and oversized upload-body handling, including draining unauthorized API requests before HTTP 401
 - Typed empty, corrupt, truncated, encrypted, and zero-page PDF errors
 - Session expiration and application-owned output cleanup
 - External corpus JSON/CSV and repeatability output
@@ -305,7 +322,7 @@ The tests cover:
 
 ## Privacy
 
-The `.gitignore` excludes PDFs, generated reports, local settings, virtual environments, and machine-specific validation artifacts. Do not commit customer documents, report outputs containing customer content, secrets, or credentials.
+The `.gitignore` excludes PDFs, generated reports, local settings, virtual environments, and machine-specific validation artifacts. The entire local `Evan Testing/` folder is ignored and is used only for development context; its emails, scripts, archives, and results are not repository content. Do not commit customer documents, report outputs containing customer content, secrets, or credentials.
 
 ## Disclaimer
 

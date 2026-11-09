@@ -139,6 +139,7 @@ RULE_WCAG_MAP = {
 
 RULE_TEST_METHOD = {
     "ACR-DOC-004": "Manual",
+    "ACR-DOC-007": "Mixed",
     "ACR-DOC-008": "Manual",
     "ACR-DOC-009": "Mixed",
     "ACR-DOC-010": "Mixed",
@@ -194,7 +195,7 @@ WCAG_POLICY = {
     "2.2.1": ("mapped", "", "Potential timing mechanisms can be detected, but their behavior requires execution.", ()),
     "2.2.2": ("mapped", "", "Potential moving or timed content can be detected, but controls require execution.", ()),
     "2.3.1": ("mapped", "", "Potential dynamic content can be detected, but flash thresholds require playback analysis.", ()),
-    "2.4.1": ("mapped", "", "Multi-page documents can be checked for tagged headings that support bypass navigation.", ("PDF9",)),
+    "2.4.1": ("mapped", "", "Bookmarks or tagged headings provide bypass-navigation prerequisites; repeated-block bypass behavior is not verified. PDF2 is advisory navigation guidance, not a sufficient technique for 2.4.1.", ("PDF2", "PDF9")),
     "2.4.2": ("mapped", "", "Metadata title quality and title-bar display are machine-testable.", ("PDF18",)),
     "2.4.3": ("mapped", "", "Focusable annotations can be checked for structure-based tab order.", ("PDF3",)),
     "2.4.4": ("mapped", "", "Link annotations can be checked for accessible text or contents.", ("PDF11", "PDF13")),
@@ -212,13 +213,19 @@ WCAG_POLICY = {
     "3.2.3": ("not_applicable", "", "Consistent navigation applies across a set of documents or pages, not one stand-alone PDF.", ()),
     "3.2.4": ("not_applicable", "", "Consistent identification applies across a set of documents or pages.", ()),
     "3.3.1": ("out_of_scope_if", "fields_or_actions", "Error-identification behavior requires form execution and semantic review.", ()),
-    "3.3.2": ("mapped", "", "Form fields can be checked for inherited non-empty tooltips.", ("PDF10",)),
+    "3.3.2": ("mapped", "", "Form fields can be checked for inherited descriptive tooltips that are not generic or internal field-name placeholders.", ("PDF10",)),
     "3.3.3": ("out_of_scope_if", "fields_or_actions", "Error-suggestion adequacy requires form execution and semantic review.", ()),
     "3.3.4": ("out_of_scope_if", "fields_or_actions", "Error-prevention behavior requires transactional form execution.", ()),
     "4.1.1": ("mapped", "", "Strict parsing detects deterministic structural failures; an independent validator is still required for complete coverage.", ()),
     "4.1.2": ("mapped", "", "Widgets, links, tags, and accessible names provide machine-testable name-role-value evidence.", ("PDF10", "PDF12")),
     "4.1.3": ("out_of_scope_if", "dynamic_content", "Status-message behavior requires interactive execution and assistive-technology observation.", ()),
 }
+
+
+def wcag_status_label(status: str, coverage: str) -> str:
+    if status == "pass" and coverage == "additional_review":
+        return "Pass (partial coverage)"
+    return WCAG_STATUS_LABELS[status]
 
 
 def _criterion_rule_ids(criterion: str) -> tuple[str, ...]:
