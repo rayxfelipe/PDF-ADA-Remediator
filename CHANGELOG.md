@@ -1,80 +1,59 @@
-# Changelog
+# Release Notes
 
-All notable changes to this project are documented in this file.
+Customer-visible improvements to the PDF Accessibility Checker and Remediator. Version numbers below identify the application checker, not WCAG success criteria.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+For current capabilities and limitations, see the [project overview](README.md). Implementation details and validation evidence are in the [developer guide](docs/developer-guide.md); earlier engineering notes remain in the [technical archive](docs/archive/technical-change-history.md).
 
-## [Unreleased]
+## Unreleased
 
-### October 28 customer-feedback follow-up (2.4.1)
+### Documentation
 
-- Require marked-content coverage on every page before declaring an existing structure tagged or enabling structure-based tab order; declaration and tab-order repairs can occur in the same verified pass.
-- Stop copying form mapping names (`/TM`) into tooltips. Validate existing `/Contents` and `/TU` values and reject generic, filename-like, and internal field-name placeholders.
-- Normalize regional language-detector codes and reject CJK results inconsistent with the observed script instead of writing an incorrect document language.
-- Drain unauthorized API request bodies without retaining them before returning HTTP 401, including requests larger than the upload limit.
-- Accept bookmarks as multi-page bypass-navigation prerequisites, fail mixed documents with any image-only page, and reject additional generic titles and technical filename identifiers.
-- Keep title results stable when a PDF is renamed: reject technical filename identifiers independently of the upload name, while allowing descriptive titles to match descriptive filenames as permitted by PDF18.
-- Label partial-coverage WCAG passes explicitly and add captions and row-header scopes to report tables.
-- Raise the checker to 2.4.1 and the ruleset to 2026.11.1; deployed to the existing Azure pilot on November 9, 2026.
-- Verify the live upload-to-download workflow and 401 responses for missing or wrong API keys with 25 MB bodies. Preserve the existing private Key Vault boundary; authorized API behavior was verified in the exact production image locally, not against the live API.
-- LLM remediation, expanded rendering and structural validation, reading-order verification, and capability-classification changes remain outstanding; this is not completion of the full customer prompt.
+- Simplify the project overview around trying the app, understanding results, current limitations, and file handling.
+- Separate developer guidance and historical records from the customer-facing introduction.
+- Organize release notes around changes that matter to users.
 
-### Changed
+## Checker version 2.4.1 - November 9, 2026
 
-- Add a complete checker-to-remediator coverage matrix that classifies all 34 deterministic checks and identifies missing evidence and required human actions.
-- Add no-regression and second-plan idempotence verification to every remediation run; no-action runs now preserve source bytes exactly.
-- Add evidence-backed repairs for an existing complete structure declaration and unambiguous structure-language tag normalization.
-- Raise the checker to 2.4.0 and the ruleset to 2026.10.4.
-- Add synthetic determinism, idempotence, no-regression, byte-preservation, coverage-matrix, and 21/25/40/50 MB slow-stream tests.
-- Add a prominent **Home / New upload** action to the top of audit and remediation reports while retaining the existing bottom Home action.
-- Separate each mapped WCAG automated result from its coverage completeness so additional-review limitations no longer erase deterministic passes or failures.
-- Add partial-coverage deterministic checks for strict PDF structural parsing (WCAG 4.1.1) and declared structure-element language tags (WCAG 3.1.2).
-- Expand safe remediation to populate missing form `/TU` tooltips from existing `/TM` or `/Contents` values only when every missing tooltip has a source value.
-- Raise the deterministic contract to audit schema 6, checker 2.3.0, and ruleset 2026.10.3.
-- Classify every WCAG 2.1 Level A/AA criterion as pass, fail, not applicable, or out of scope instead of using ambiguous manual/not-tested states.
-- Add a document evidence inventory and criterion-level policy rationales with relevant W3C PDF technique identifiers.
-- Exclude not-applicable and out-of-scope checks from the automated accessibility score.
-- Require inherited non-empty form-field `/TU` descriptions; field names no longer count as descriptions.
-- Compare declared document language with seeded, confidence-gated deterministic language detection before reporting a pass or changing `/Lang`.
-- Reject generic, numbered, authoring-tool, and filename-like metadata titles, including `Scanned Document`.
-- Treat absent images, annotations, links, forms, scripts, media, tables, lists, and headings as not applicable instead of vacuous passes.
-- Add typed 400, 413, and 422 PDF input errors for malformed requests, oversized uploads, and unreadable PDF content.
-- Expire inactive standalone workflow sessions and delete only application-owned remediated files.
-- Audit Azure Function uploads before blob persistence and add expiration metadata to job blobs.
-- Add a generic external corpus runner that writes per-file JSON plus summary JSON/CSV with commit, runtime, dependency, source-hash, and repeatability evidence.
-- Allow container builds to receive standard pip index and trusted-host build arguments without hardcoding an organization-specific package feed.
-- Make the deterministic PDF audit the sole authority for remediation planning and verification.
-- Accept the source PDF directly in the remediator CLI and PDF-only API.
-- Add schema, checker, and ruleset versions plus source SHA-256 to deterministic audit reports.
-- Add source/output SHA-256 values and verified object-level actions to remediation reports.
-- Treat successful text extraction as insufficient evidence of valid character encoding; object-level or assistive-technology verification is now required.
-- Preserve meaningful existing document titles while rejecting generic titles and titles that duplicate the filename.
-- Set structure-based tab order only when the source document has a structure tree that passes local validation.
-- Require a remediation success to show that the same local check changed from a non-passing result before remediation to a pass afterward.
+### Safer automatic fixes
 
-### Removed
+- Require stronger evidence before treating an existing PDF structure as tagged or enabling structure-based navigation.
+- Stop turning internal form mapping names into field descriptions; only use validated descriptive content.
+- Reject language-detection results that conflict with the document's Chinese, Japanese, or Korean script.
 
-- Remove external audit-report and Markdown-report inputs from remediation.
-- Remove the third-party remediation-report upload and report-driven API contract.
-- Remove imported-checker scoring, evidence, manual queues, and compatibility rule mappings.
-- Decommission the former AI checker fork deployment, checker-only container images, and checker-exclusive Microsoft Foundry resource group; the deterministic checker/remediator remains independently deployed.
-- Removed automatic baseline structure generation that inferred paragraphs, figures, and artifacts from PDF drawing operators.
+### More accurate results
 
-### Fixed
+- Detect scanned or image-only pages even when other pages contain readable text.
+- Recognize bookmarks when checking prerequisites for bypass navigation in multi-page documents.
+- Reject more generic or technical-identifier titles, while allowing meaningful titles to match descriptive filenames. Renaming a PDF no longer changes its title result.
+- Label partial-coverage passes explicitly and improve the accessibility of report tables.
 
-- Return a deterministic failure for missing or invalid document `/Lang` before evaluating whether text-language detection is conclusive.
-- Prefer mapped pass/fail outcomes over out-of-scope subchecks while retaining the limitation as additional-review coverage.
-- Read request bodies in bounded chunks, drain oversized uploads without retaining them, and return HTTP 413 instead of closing the connection early.
-- Reject oversized files in the standalone browser before upload and make the 20 MB limit configurable with `PDF_MAX_UPLOAD_BYTES`.
-- Set structure-based tab order only for an applicable failed tab-order check, not for a not-applicable check.
-- Interpret `/MarkInfo /Marked = false` as false instead of relying on `BooleanObject` truthiness.
-- Do not accept generic metadata such as `PowerPoint Presentation` as a meaningful document title.
-- Reject empty structure trees and marked content without valid structure-element mappings.
-- Reject empty, corrupt, truncated, password-protected, and zero-page PDFs with explicit client errors.
-- Correct W3C PDF technique references for title, links, keyboard forms, headings, and structural checks.
-- Show only the source filename in reports instead of exposing the server or workstation path.
+### More reliable uploads
 
-### Security
+- Return an explicit unauthorized response for oversized API requests with missing or incorrect keys instead of a gateway error.
 
-- Continue processing uploaded source PDFs in temporary storage without adding customer documents to repository history.
-- Prevent caller-supplied reports from controlling executable remediation actions.
+This build was deployed to the pilot on November 9, 2026. The upload-to-download workflow and oversized unauthorized requests were verified through the live site. These changes do not add LLM remediation, OCR, full structural validation, or semantic reading-order verification.
+
+## Checker version 2.4.0 - October 28, 2026
+
+### Clearer remediation reports
+
+- Explain which detected issues have supported fixes, which need existing document evidence, and which remain outside the available automation.
+- Verify that applied fixes succeed, existing automated passes do not regress, and repeating remediation adds no further changes.
+- Preserve the original file bytes when no supported fix is available.
+
+### Additional evidence-based repairs
+
+- Add repairs for existing tagging declarations and unambiguous language-tag formatting. Version 2.4.1 subsequently tightened the tagging safeguards.
+
+## Earlier updates
+
+These highlights summarize earlier development; they are not new capabilities in the latest release.
+
+- Establish a standalone PDF workflow that performs its own checks, applies supported fixes, and checks the output again, without requiring another tool's report.
+- Add coverage reporting for all 50 WCAG 2.1 Level A and AA success criteria, with explicit limitations and separate not-applicable and out-of-scope results.
+- Improve language, title, form-description, and PDF-structure checks, and stop treating missing content as an automatic pass.
+- Add clearer errors for oversized, empty, corrupt, and unsupported PDFs, along with session expiration and cleanup.
+- Improve navigation between upload, audit, and remediation reports.
+- Remove speculative automatic tagging rather than claim that inferred structure was verified.
+
+The [historical technical notes](docs/archive/technical-change-history.md) retain the original implementation-level change record.

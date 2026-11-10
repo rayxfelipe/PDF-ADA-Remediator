@@ -1,6 +1,8 @@
-# Customer Accessibility Validation - September 21, 2026
+# Historical Validation - September 21, 2026
 
 > **Historical record:** This validation describes the former external-report integration. That integration was removed on 2026-10-06. The current application performs its own deterministic audit, remediation planning, remediation, and verification without accepting another application's report as input.
+
+For current capabilities, see the [project overview](../../README.md). Current technical guidance and release-validation evidence are in the [developer guide](../developer-guide.md). All findings, dispositions, recommendations, and test counts below describe the historical implementation, not the current release.
 
 ## Purpose
 
@@ -86,9 +88,9 @@ Results:
 - The repository's production-shaped external report imported 32 findings, three source-context notes, and eight manual verification tasks.
 - End-to-end remediation completed against the repository fixture using temporary output.
 
-## Traceability
+## Historical traceability
 
-- The changelog summarizes user-visible behavior under the Unreleased section.
+- The [archived technical notes](../archive/technical-change-history.md) retain earlier engineering changes; the [current release notes](../../CHANGELOG.md) summarize customer-visible changes by release.
 - Regression tests provide executable acceptance criteria.
 - The implementation pull request links the GitHub tracking issue for unresolved cross-application work.
 - A release tag should be created only after review and merge so it identifies the reviewed implementation.
